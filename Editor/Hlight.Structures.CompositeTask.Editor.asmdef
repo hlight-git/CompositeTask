@@ -1,0 +1,16 @@
+{
+    "name": "Hlight.Structures.CompositeTask.Editor",
+    "rootNamespace": "Hlight.Structures.CompositeTask.Editor",
+    "references": [
+        "Hlight.Structures.CompositeTask.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
