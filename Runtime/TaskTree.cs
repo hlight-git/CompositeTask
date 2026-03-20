@@ -8,6 +8,11 @@ namespace Hlight.Structures.CompositeTask.Runtime
     {
         [field: SerializeField] public CompositeTaskNode Root { get; set; }
 
+        public void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor)
+        {
+            dependencyInjectionVisitor.Visit(Root);
+        }
+
         public CancellationTokenSource Execute()
         {
             var cancellationTokenSource = new CancellationTokenSource();

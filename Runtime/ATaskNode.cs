@@ -15,7 +15,10 @@ namespace Hlight.Structures.CompositeTask.Runtime
         protected CancellationTokenSource taskBeginCancellationTokenSource;
         protected CancellationTokenSource taskEndCancellationTokenSource;
         
+        [Newtonsoft.Json.JsonIgnore]
         public TaskNodeStatus Status { get; private set; }
+        
+        [Newtonsoft.Json.JsonIgnore]
         public virtual float Progress
         {
             get => progress;
@@ -101,6 +104,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
             Completed = null;
         }
 
+        public abstract void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor);
         protected abstract UniTask OnTaskBegin(CancellationToken cancellationToken);
         protected abstract UniTask OnTaskEnd(CancellationToken cancellationToken);
     }

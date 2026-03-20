@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
@@ -18,10 +17,18 @@ namespace Hlight.Structures.CompositeTask.Runtime
             public float subTaskValue;
             [SerializeReference] public ATaskNode taskNode;
         }
-        
+        [Newtonsoft.Json.JsonConverter(typeof(Newtonsoft.Json.Converters.StringEnumConverter))]
         [SerializeField] public ExecutionMode executionMode;
         [SerializeField] public List<Child> children;
-        
+
+        public override void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor)
+        {
+            foreach (var child in children)
+            {
+                child.taskNode.Accept(dependencyInjectionVisitor);
+            }
+        }
+
         protected override async UniTask OnTaskBegin(CancellationToken cancellationToken)
         {
             if (executionMode == ExecutionMode.Sequential)

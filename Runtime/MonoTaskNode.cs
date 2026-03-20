@@ -8,6 +8,11 @@ namespace Hlight.Structures.CompositeTask.Runtime
     {
         [SerializeReference] public ITaskDefinition taskDefinition;
 
+        public override void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor)
+        {
+            taskDefinition.Accept(dependencyInjectionVisitor);
+        }
+
         protected override UniTask OnTaskBegin(CancellationToken cancellationToken)
         {
             return taskDefinition.OnBegin(this, cancellationToken);
