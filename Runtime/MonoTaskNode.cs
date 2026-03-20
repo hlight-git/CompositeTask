@@ -26,9 +26,9 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         public override void ForceCompleteImmediate()
         {
-            base.ForceCompleteImmediate();
             if (Status == TaskNodeStatus.Completed) return;
-            taskDefinition.OnCompleted(this);
+            taskDefinition?.OnCompleted(this);
+            base.ForceCompleteImmediate();
         }
     }
 }

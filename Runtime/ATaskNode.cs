@@ -6,7 +6,7 @@ using UnityEngine;
 namespace Hlight.Structures.CompositeTask.Runtime
 {
     [Serializable]
-    public abstract class ATaskNode
+    public abstract class ATaskNode : IDisposable
     {
         public string name;
         [Range(0, 1)]
@@ -28,15 +28,10 @@ namespace Hlight.Structures.CompositeTask.Runtime
                 var delta = clampedValue - progress;
                 progress = clampedValue;
                 ProgressChanged?.Invoke(this, delta);
-
-                if (progress >= targetProgressToComplete)
-                {
-                    ForceComplete();
-                }
             }
         }
-        public virtual event Action<ATaskNode, float> ProgressChanged;
-        public virtual event Action<ATaskNode> Completed;
+        public event Action<ATaskNode, float> ProgressChanged;
+        public event Action<ATaskNode> Completed;
         
         public async UniTask ExecuteAsync(CancellationToken externalCancellationToken)
         {
