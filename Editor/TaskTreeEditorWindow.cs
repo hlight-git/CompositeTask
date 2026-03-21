@@ -3,14 +3,25 @@
 //  EditorWindow gồm hai panel: Hierarchy (trái) + Inspector (phải).
 //  Giống Unity Hierarchy / Inspector cho TaskTree.
 //
-//  Runtime fields (readonly — đúng theo spec):
-//    ATaskNode              : string name, TaskNodeStatus Status, float Progress
-//                             Reset(), ForceComplete(), ForceCompleteImmediate()
-//    MonoTaskNode           : ITaskDefinition taskDefinition   [SerializeReference]
-//    CompositeTaskNode      : ExecutionMode executionMode, List<Child> children
-//    CompositeTaskNode.Child: float subTaskValue, ATaskNode taskNode
-//    TaskTree (MonoBehaviour): CompositeTaskNode rootNode
-//    TaskTree.Execute()     → CancellationTokenSource
+//  Event flow trong OnGUI():
+//    1. BuildStyles()          — lazy-init GUIStyle
+//    2. RebuildEnabledCache()  — O(n) cache enabled state cho mỗi node
+//    3. HandleKeyboard()       — keyboard shortcuts (trước drawing để consume event)
+//    4. HandleDragInHierarchy()— drag threshold + drag movement + drop commit
+//    5. HandleTaskTreeSelector()— toolbar (TaskTree + Database ObjectField)
+//    6. DrawHierarchy()        — left panel (scroll → recursive DrawNodeRow)
+//    7. DrawDivider()          — resizable divider (only when a node is selected)
+//    8. DrawInspector()        — right panel (only when a node is selected)
+//
+//  Coordinate systems:
+//    - Screen coords: Event.current.mousePosition (relative to window)
+//    - Scroll-local coords: relative to ScrollView content (dùng ScreenToScrollLocal())
+//
+//  Odin Inspector:
+//    Khi ODIN_INSPECTOR được define, taskDefinition fields được vẽ bằng Odin PropertyTree
+//    để tận dụng custom drawer, attribute (ShowIf, FoldoutGroup...).
+//    Window vẫn kế thừa EditorWindow (không dùng OdinEditorWindow) để tránh
+//    conflict event handling.
 // =============================================================================
 
 using System;
@@ -24,37 +35,85 @@ namespace Hlight.Structures.CompositeTask.Editor
 {
     public class TaskTreeEditorWindow : EditorWindow
     {
-        // ── Open ──────────────────────────────────────────────────────────
-        [MenuItem("Window/Task Tree Editor")]
-        public static void Open()
-        {
-            var win = GetWindow<TaskTreeEditorWindow>("Task Tree");
-            win.minSize = new Vector2(600, 400);
-            win.Show();
-        }
+        // ══════════════════════════════════════════════════════════════════
+        //  CONSTANTS
+        // ══════════════════════════════════════════════════════════════════
 
-        // Open và bind một TaskTree cụ thể
-        public static void OpenWith(TaskTree tree)
-        {
-            var win = GetWindow<TaskTreeEditorWindow>("Task Tree");
-            win.minSize = new Vector2(600, 400);
-            win._taskTree = tree;
-            win.Show();
-        }
+        #region Constants
 
-        // ── State ─────────────────────────────────────────────────────────
+        // Layout
+        const float MinWindowWidth      = 600f;
+        const float MinWindowHeight     = 400f;
+        const float ToolbarObjectFieldW = 240f;
+        const float ExecuteButtonW      = 90f;
+        const float MinHierarchyWidth   = 150f;
+        const float MinInspectorWidth   = 200f;
+        const float DividerWidth        = 4f;
+        const float PanelHeaderHeight   = 22f;
+        const float SearchBarHeight     = 20f;
+        const float ToolbarExtraHeight  = 6f;
+
+        // Hierarchy rows
+        const float RowHeight    = 20f;
+        const float IndentStep   = 14f;
+        const float FoldoutW     = 14f;
+        const float StatusDotW   = 14f;
+        const float BadgeW       = 38f;
+        const float BadgePadding = 2f;
+        const float RowPadLeft   = 4f;
+
+        // Drag
+        const float DragThreshSq = 64f; // 8px threshold
+
+        // Repaint
+        const double RepaintInterval = 0.05;
+
+        // Colors
+        static readonly Color HierarchyBg        = new(0.19f, 0.19f, 0.19f);
+        static readonly Color PanelHeaderBg      = new(0.15f, 0.15f, 0.15f);
+        static readonly Color InspectorBg        = new(0.22f, 0.22f, 0.22f);
+        static readonly Color SelectionHighlight = new(0.24f, 0.49f, 0.91f, 0.85f);
+        static readonly Color HoverHighlight     = new(0.3f, 0.3f, 0.3f, 0.4f);
+        static readonly Color DropLineColor      = new(0.35f, 0.8f, 1f);
+        static readonly Color DropLineInRowColor = new(0.3f, 0.75f, 1f);
+        static readonly Color DividerColor       = new(0.1f, 0.1f, 0.1f);
+        static readonly Color SeparatorColor     = new(0.13f, 0.13f, 0.13f);
+        static readonly Color StatusRunning      = new(0.2f, 0.8f, 1f);
+        static readonly Color StatusCompleted    = new(0.2f, 0.85f, 0.3f);
+        static readonly Color StatusPending      = new(0.45f, 0.45f, 0.45f);
+        static readonly Color DisabledTextColor  = new(0.5f, 0.5f, 0.5f);
+        static readonly Color ErrorTextColor     = new(1f, 0.25f, 0.25f);
+        static readonly Color DeleteBtnColor     = new(1f, 0.4f, 0.4f);
+        static readonly Color FoldoutArrowColor  = new(0.8f, 0.8f, 0.8f, 0.8f);
+
+        // Strings
+        const string RenameControlName = "RenameField";
+        const string WindowTitle       = "Task Tree";
+        const string MenuPath          = "Window/Task Tree Editor";
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  STATE
+        // ══════════════════════════════════════════════════════════════════
+
+        #region State
+
         TaskTree   _taskTree;
         [SerializeField] TaskDefinitionDatabase _taskDefinitionDatabase;
         ATaskNode  _selected;
 
         // Hierarchy
         float      _hierarchyWidth   = 300f;
-        bool       _resizingDivider  = false;
+        bool       _resizingDivider;
         Vector2    _hierarchyScroll;
         Rect       _hierarchyScrollRect;
-        Dictionary<ATaskNode, bool> _expanded = new(); // CompositeTaskNode → expanded
+        Dictionary<ATaskNode, bool> _expanded = new();
 
-        // Rename inline
+        // Search
+        string _searchFilter = "";
+
+        // Rename
         ATaskNode  _renamingNode;
         string     _renameBuffer;
         bool       _focusRenameField;
@@ -63,58 +122,104 @@ namespace Hlight.Structures.CompositeTask.Editor
         ATaskNode  _draggedNode;
         bool       _dragActive;
         Vector2    _dragStartPos;
-        const float DragThreshSq = 25f;
-        // Drop indicator
-        CompositeTaskNode  _dropParentTarget;  // composite ta sẽ insert vào
-        int        _dropInsertIndex;   // vị trí insert trong dropParentTarget.children
+        CompositeTaskNode _dropParentTarget;
+        int        _dropInsertIndex;
         bool       _dropValid;
 
-        // Copy/Paste clipboard
+        // Clipboard
         ATaskNode  _clipboard;
 
-        // Inspector scroll
+        // Inspector
+        bool       _showInspector;
         Vector2    _inspectorScroll;
+        SerializedObject _serializedTaskTree;
 
         // Repaint throttle (Play Mode)
-        double       _lastRepaint;
-        const double RepaintInterval = 0.05;
+        double _lastRepaint;
 
-        // Styles (built lazily)
+        // Styles
         GUIStyle _labelStyle;
         GUIStyle _dimLabelStyle;
         GUIStyle _headerStyle;
         GUIStyle _sectionStyle;
         GUIStyle _renameStyle;
+        GUIStyle _foldoutArrowStyle;
+        GUIStyle _statusDotStyle;
+        GUIStyle _nodeNameStyle;
         bool     _stylesBuilt;
 
-        // ── Unity lifecycle ───────────────────────────────────────────────
+        // Caches
+        Dictionary<ATaskNode, bool> _enabledCache = new();
+
+#if ODIN_INSPECTOR
+        // Odin PropertyTree để vẽ taskDefinition theo style Odin
+        Sirenix.OdinInspector.Editor.PropertyTree _odinTaskDefTree;
+        object _odinTaskDefTarget;
+#endif
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  OPEN
+        // ══════════════════════════════════════════════════════════════════
+
+        #region Open
+
+        [MenuItem(MenuPath)]
+        public static void Open()
+        {
+            var win = GetWindow<TaskTreeEditorWindow>(WindowTitle);
+            win.minSize = new Vector2(MinWindowWidth, MinWindowHeight);
+            win.Show();
+        }
+
+        public static void OpenWith(TaskTree tree)
+        {
+            var win = GetWindow<TaskTreeEditorWindow>(WindowTitle);
+            win.minSize = new Vector2(MinWindowWidth, MinWindowHeight);
+            win._taskTree = tree;
+            win.RebuildSerializedObject();
+            win.ClearEditState();
+            win.Show();
+        }
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  UNITY LIFECYCLE
+        // ══════════════════════════════════════════════════════════════════
+
+        #region Lifecycle
+
         void OnEnable()
         {
             EditorApplication.update               += OnUpdate;
             EditorApplication.playModeStateChanged += OnPlayModeChanged;
-            Undo.undoRedoPerformed                 += Repaint;
+            Undo.undoRedoPerformed                 += OnUndoRedo;
             EnsureTaskDefinitionDatabase();
+            RebuildSerializedObject();
         }
 
         void OnDisable()
         {
             EditorApplication.update               -= OnUpdate;
             EditorApplication.playModeStateChanged -= OnPlayModeChanged;
-            Undo.undoRedoPerformed                 -= Repaint;
+            Undo.undoRedoPerformed                 -= OnUndoRedo;
+#if ODIN_INSPECTOR
+            DisposeOdinTaskDefTree();
+#endif
         }
 
         void OnSelectionChange()
         {
-            // Tự động target TaskTree theo GameObject đang được chọn trong scene.
             var go = Selection.activeGameObject;
             if (go == null) return;
-
             var tree = go.GetComponent<TaskTree>();
             if (tree != null && tree != _taskTree)
             {
                 _taskTree = tree;
-                _selected = null;
-                _expanded.Clear();
+                RebuildSerializedObject();
+                ClearEditState();
                 Repaint();
             }
         }
@@ -130,10 +235,53 @@ namespace Hlight.Structures.CompositeTask.Editor
 
         void OnPlayModeChanged(PlayModeStateChange _) => Repaint();
 
-        // ── OnGUI ─────────────────────────────────────────────────────────
+        void OnUndoRedo()
+        {
+            // Undo có thể thay đổi data bên dưới → refresh SerializedObject
+            RebuildSerializedObject();
+#if ODIN_INSPECTOR
+            DisposeOdinTaskDefTree();
+#endif
+            Repaint();
+        }
+
+        void ClearEditState()
+        {
+            _selected         = null;
+            _renamingNode     = null;
+            _renameBuffer     = null;
+            _focusRenameField = false;
+            _dragActive       = false;
+            _draggedNode      = null;
+            _dropValid        = false;
+            _clipboard        = null;
+            _searchFilter     = "";
+            _expanded.Clear();
+            _enabledCache.Clear();
+            _inspectorScroll  = Vector2.zero;
+            _hierarchyScroll  = Vector2.zero;
+#if ODIN_INSPECTOR
+            DisposeOdinTaskDefTree();
+#endif
+        }
+
+        void RebuildSerializedObject()
+        {
+            _serializedTaskTree = _taskTree != null ? new SerializedObject(_taskTree) : null;
+        }
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  ONGUI
+        // ══════════════════════════════════════════════════════════════════
+
+        #region OnGUI
+
         void OnGUI()
         {
             BuildStyles();
+            RebuildEnabledCache();
             HandleKeyboard();
             HandleDragInHierarchy();
             HandleTaskTreeSelector();
@@ -144,38 +292,43 @@ namespace Hlight.Structures.CompositeTask.Editor
                 return;
             }
 
-            // Layout: Hierarchy | Divider | Inspector
-            var totalRect = new Rect(0, EditorGUIUtility.singleLineHeight + 6,
-                                     position.width,
-                                     position.height - EditorGUIUtility.singleLineHeight - 6);
+            var totalRect = new Rect(0, EditorGUIUtility.singleLineHeight + ToolbarExtraHeight,
+                position.width,
+                position.height - EditorGUIUtility.singleLineHeight - ToolbarExtraHeight);
 
-            var hierarchyRect = new Rect(totalRect.x, totalRect.y,
-                                          _hierarchyWidth, totalRect.height);
-            var dividerRect   = new Rect(_hierarchyWidth, totalRect.y, 4, totalRect.height);
-            var inspectorRect = new Rect(_hierarchyWidth + 4, totalRect.y,
-                                          totalRect.width - _hierarchyWidth - 4, totalRect.height);
+            // Capture layout mode at Layout event to keep GUILayout groups consistent
+            // between Layout and Repaint passes within the same frame.
+            if (Event.current.type == EventType.Layout)
+                _showInspector = _selected != null;
 
-            DrawHierarchy(hierarchyRect);
-            DrawDivider(dividerRect);
-            DrawInspector(inspectorRect);
-
-            HandleDividerResize(dividerRect);
-
-            // Consume rename commit on Enter / Escape outside text field
-            if (_renamingNode != null)
+            if (_showInspector)
             {
-                var e = Event.current;
-                if (e.type == EventType.KeyDown)
-                {
-                    if (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter)
-                    { CommitRename(); e.Use(); }
-                    else if (e.keyCode == KeyCode.Escape)
-                    { CancelRename(); e.Use(); }
-                }
+                _hierarchyWidth = Mathf.Clamp(_hierarchyWidth, MinHierarchyWidth,
+                    totalRect.width - MinInspectorWidth - DividerWidth);
+                var hierarchyRect = new Rect(totalRect.x, totalRect.y, _hierarchyWidth, totalRect.height);
+                var dividerRect   = new Rect(_hierarchyWidth, totalRect.y, DividerWidth, totalRect.height);
+                var inspectorRect = new Rect(_hierarchyWidth + DividerWidth, totalRect.y,
+                    totalRect.width - _hierarchyWidth - DividerWidth, totalRect.height);
+
+                DrawHierarchy(hierarchyRect);
+                DrawDivider(dividerRect);
+                DrawInspector(inspectorRect);
+                HandleDividerResize(dividerRect);
+            }
+            else
+            {
+                DrawHierarchy(totalRect);
             }
         }
 
-        // ── TaskTree selector toolbar ─────────────────────────────────────
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  TOOLBAR
+        // ══════════════════════════════════════════════════════════════════
+
+        #region Toolbar
+
         void HandleTaskTreeSelector()
         {
             GUILayout.BeginHorizontal(EditorStyles.toolbar);
@@ -183,28 +336,26 @@ namespace Hlight.Structures.CompositeTask.Editor
             EditorGUI.BeginChangeCheck();
             var newTree = (TaskTree)EditorGUILayout.ObjectField(
                 _taskTree, typeof(TaskTree), allowSceneObjects: true,
-                GUILayout.Width(240));
+                GUILayout.Width(ToolbarObjectFieldW));
             if (EditorGUI.EndChangeCheck())
             {
                 _taskTree = newTree;
-                _selected  = null;
-                _expanded.Clear();
+                RebuildSerializedObject();
+                ClearEditState();
             }
 
             EditorGUI.BeginChangeCheck();
             var newDatabase = (TaskDefinitionDatabase)EditorGUILayout.ObjectField(
                 _taskDefinitionDatabase, typeof(TaskDefinitionDatabase), allowSceneObjects: false,
-                GUILayout.Width(240));
+                GUILayout.Width(ToolbarObjectFieldW));
             if (EditorGUI.EndChangeCheck())
-            {
                 _taskDefinitionDatabase = newDatabase;
-            }
 
             GUILayout.FlexibleSpace();
 
             if (_taskTree != null && Application.isPlaying)
             {
-                if (GUILayout.Button("▶  Execute", EditorStyles.toolbarButton, GUILayout.Width(90)))
+                if (GUILayout.Button("▶  Execute", EditorStyles.toolbarButton, GUILayout.Width(ExecuteButtonW)))
                     _taskTree.Execute();
             }
 
@@ -222,21 +373,32 @@ namespace Hlight.Structures.CompositeTask.Editor
             GUILayout.FlexibleSpace();
         }
 
+        #endregion
+
         // ══════════════════════════════════════════════════════════════════
-        //  HIERARCHY
+        //  HIERARCHY PANEL
         // ══════════════════════════════════════════════════════════════════
+
+        #region Hierarchy
+
         void DrawHierarchy(Rect rect)
         {
-            // Background
-            EditorGUI.DrawRect(rect, new Color(0.19f, 0.19f, 0.19f));
+            EditorGUI.DrawRect(rect, HierarchyBg);
 
             // Header
-            var headerRect = new Rect(rect.x, rect.y, rect.width, 22);
-            EditorGUI.DrawRect(headerRect, new Color(0.15f, 0.15f, 0.15f));
+            var headerRect = new Rect(rect.x, rect.y, rect.width, PanelHeaderHeight);
+            EditorGUI.DrawRect(headerRect, PanelHeaderBg);
             GUI.Label(headerRect, "  Hierarchy", _headerStyle);
 
+            float contentTop = rect.y + PanelHeaderHeight;
+
+            // Search bar (EditorGUI để set editingTextField, ngăn HandleKeyboard ăn phím)
+            var searchRect = new Rect(rect.x + 2, contentTop + 1, rect.width - 4, SearchBarHeight - 2);
+            _searchFilter = EditorGUI.TextField(searchRect, _searchFilter, EditorStyles.toolbarSearchField);
+            contentTop += SearchBarHeight;
+
             // Scroll area
-            var scrollRect = new Rect(rect.x, rect.y + 22, rect.width, rect.height - 22);
+            var scrollRect = new Rect(rect.x, contentTop, rect.width, rect.height - PanelHeaderHeight - SearchBarHeight);
             _hierarchyScrollRect = scrollRect;
             _hierarchyScroll = GUI.BeginScrollView(scrollRect, _hierarchyScroll,
                 new Rect(0, 0, scrollRect.width - 16, GetTreeContentHeight(_taskTree?.Root, 0)));
@@ -245,22 +407,16 @@ namespace Hlight.Structures.CompositeTask.Editor
             if (_taskTree.Root != null)
                 DrawNodeRow(_taskTree.Root, null, -1, 0, ref y, scrollRect.width);
             else
-            {
-                GUI.Label(new Rect(8, y, scrollRect.width, 20),
+                GUI.Label(new Rect(8, y, scrollRect.width, RowHeight),
                     "(empty — right-click to create root)", _dimLabelStyle);
-            }
 
             GUI.EndScrollView();
 
-            // Right-click context menu on scroll area
+            // Context menu on right-click
             var e = Event.current;
             if (e.type == EventType.ContextClick && scrollRect.Contains(e.mousePosition))
             {
-                // Đưa tọa độ màn hình về local trong content của ScrollView
-                var localPos = e.mousePosition;
-                localPos.x -= scrollRect.x;
-                localPos.y -= scrollRect.y;
-                localPos.y += _hierarchyScroll.y;
+                var localPos = ScreenToScrollLocal(e.mousePosition);
                 ShowContextMenu(HitTestNode(_taskTree?.Root, localPos, 0));
                 e.Use();
             }
@@ -268,16 +424,13 @@ namespace Hlight.Structures.CompositeTask.Editor
             // Click on empty space → deselect
             if (e.type == EventType.MouseDown && e.button == 0 && scrollRect.Contains(e.mousePosition))
             {
-                var localPos = e.mousePosition;
-                localPos.x -= scrollRect.x;
-                localPos.y -= scrollRect.y;
-                localPos.y += _hierarchyScroll.y;
+                var localPos = ScreenToScrollLocal(e.mousePosition);
                 var hit = HitTestNode(_taskTree?.Root, localPos, 0);
                 if (hit == null)
                 {
                     CommitRename();
                     _selected = null;
-                    GUI.FocusControl(null);
+                    ClearTextFieldFocus();
                     Repaint();
                 }
             }
@@ -287,14 +440,12 @@ namespace Hlight.Structures.CompositeTask.Editor
                 DrawDropIndicator(rect, scrollRect);
         }
 
-        // ── Recursive row draw ────────────────────────────────────────────
-        const float RowHeight  = 20f;
-        const float IndentStep = 14f;
-        const float FoldoutW   = 14f;
+        // ── Row drawing (recursive) ──
 
         float GetTreeContentHeight(ATaskNode node, int depth)
         {
-            if (node == null) return 20; // placeholder
+            if (node == null) return RowHeight;
+            if (!IsVisibleBySearch(node)) return 0;
             float h = RowHeight;
             if (node is CompositeTaskNode comp && IsExpanded(comp) && comp.children != null)
                 foreach (var ch in comp.children)
@@ -306,29 +457,30 @@ namespace Hlight.Structures.CompositeTask.Editor
         void DrawNodeRow(ATaskNode node, CompositeTaskNode parent, int indexInParent,
                          int depth, ref float y, float width)
         {
-            var e         = Event.current;
-            var rowRect   = new Rect(0, y, width, RowHeight);
-            float indent  = 4 + depth * IndentStep;
+            if (!IsVisibleBySearch(node)) return;
 
-            // ── Enabled state (giống GameObject: node bị disable sẽ xám) ──
-            bool isSelected   = node == _selected;
-            bool isHierarchyEnabled = IsNodeHierarchyEnabled(node);
+            var e        = Event.current;
+            var rowRect  = new Rect(0, y, width, RowHeight);
+            float indent = RowPadLeft + depth * IndentStep;
 
-            // ── Selection / hover background ──
+            bool isSelected = node == _selected;
+            bool isEnabled  = IsNodeHierarchyEnabled(node);
+            bool isRoot     = _taskTree != null && node == _taskTree.Root;
+
+            // Selection/hover background
             if (isSelected)
-                EditorGUI.DrawRect(rowRect, new Color(0.24f, 0.49f, 0.91f, 0.85f));
+                EditorGUI.DrawRect(rowRect, SelectionHighlight);
             else if (rowRect.Contains(e.mousePosition) && e.type == EventType.Repaint)
-                EditorGUI.DrawRect(rowRect, new Color(0.3f, 0.3f, 0.3f, 0.4f));
+                EditorGUI.DrawRect(rowRect, HoverHighlight);
 
-            // ── Drop highlight ──
+            // Drop highlight
             if (_dragActive && _dropValid && _dropParentTarget == parent &&
                 _dropInsertIndex == indexInParent)
-                EditorGUI.DrawRect(new Rect(rowRect.x, rowRect.y - 1, rowRect.width, 2),
-                    new Color(0.3f, 0.75f, 1f));
+                EditorGUI.DrawRect(new Rect(rowRect.x, rowRect.y - 1, rowRect.width, 2), DropLineInRowColor);
 
             float cx = indent;
 
-            // ── Foldout triangle ──
+            // Foldout triangle
             if (node is CompositeTaskNode compNode)
             {
                 bool expanded = IsExpanded(compNode);
@@ -340,107 +492,95 @@ namespace Hlight.Structures.CompositeTask.Editor
                     e.Use();
                 }
                 if (e.type == EventType.Repaint)
-                {
-                    GUI.Label(foldRect, expanded ? "▼" : "▶",
-                        new GUIStyle(EditorStyles.label) { normal = { textColor = new Color(0.8f, 0.8f, 0.8f, 0.8f) } });
-                }
+                    GUI.Label(foldRect, expanded ? "▼" : "▶", _foldoutArrowStyle);
                 cx += FoldoutW;
             }
-            else cx += FoldoutW; // mono nodes indented same amount
+            else cx += FoldoutW;
 
-            // ── Status dot (Play Mode) ──
-            if (Application.isPlaying && node != null)
+            // Status dot (Play Mode)
+            if (Application.isPlaying)
             {
                 Color dotColor = node.Status switch
                 {
-                    TaskNodeStatus.Running   => new Color(0.2f, 0.8f, 1f),
-                    TaskNodeStatus.Completed => new Color(0.2f, 0.85f, 0.3f),
-                    _                        => new Color(0.45f, 0.45f, 0.45f),
+                    TaskNodeStatus.Running   => StatusRunning,
+                    TaskNodeStatus.Completed => StatusCompleted,
+                    _                        => StatusPending,
                 };
                 if (e.type == EventType.Repaint)
                 {
-                    var oldColor = GUI.color;
-                    GUI.color = dotColor;
-                    GUI.Label(new Rect(cx, y + 3, 12, 14), "●",
-                        new GUIStyle(EditorStyles.label) { fontSize = 9, normal = { textColor = dotColor } });
-                    GUI.color = oldColor;
+                    _statusDotStyle.normal.textColor = dotColor;
+                    GUI.Label(new Rect(cx, y + 3, 12, 14), "●", _statusDotStyle);
                 }
-                cx += 14;
+                cx += StatusDotW;
             }
 
-            // ── Type badge ──
+            // Type badge
             string badge = node switch
             {
                 CompositeTaskNode c => c.executionMode == ExecutionMode.Sequential ? "[Seq]" : "[Par]",
-                MonoTaskNode      m => "[Mono]",
+                MonoTaskNode        => "[Mono]",
                 _                   => "[?]",
             };
-            bool isRoot = _taskTree != null && node == _taskTree.Root;
             if (isRoot) badge = "[Root]";
-            float badgeW = 38;
             if (e.type == EventType.Repaint)
-                GUI.Label(new Rect(cx, y, badgeW, RowHeight), badge, _dimLabelStyle);
-            cx += badgeW + 2;
+                GUI.Label(new Rect(cx, y, BadgeW, RowHeight), badge, _dimLabelStyle);
+            cx += BadgeW + BadgePadding;
 
-            // ── Name (label hoặc rename field) ──
+            // Name (label or rename field)
             float nameX = cx;
             float nameW = width - cx - 4;
 
             if (_renamingNode == node)
             {
-                // Inline rename text field
                 var renameRect = new Rect(nameX, y + 1, nameW, RowHeight - 2);
-                GUI.SetNextControlName("RenameField");
+                GUI.SetNextControlName(RenameControlName);
                 _renameBuffer = GUI.TextField(renameRect, _renameBuffer, _renameStyle);
 
-                // Đảm bảo chỉ gọi FocusTextInControl trong Repaint của frame đầu tiên
                 if (_focusRenameField && e.type == EventType.Repaint)
                 {
-                    EditorGUI.FocusTextInControl("RenameField");
+                    EditorGUI.FocusTextInControl(RenameControlName);
                     _focusRenameField = false;
                 }
 
-                // Commit on click outside
+                // Click outside rename field → commit
                 if (e.type == EventType.MouseDown && !renameRect.Contains(e.mousePosition))
                     CommitRename();
             }
             else
             {
                 string displayName = string.IsNullOrEmpty(node.name) ? string.Empty : node.name;
-
-                var labelRect = new Rect(nameX, y, nameW, RowHeight);
                 if (e.type == EventType.Repaint)
                 {
-                    var style = new GUIStyle(_labelStyle);
-
-                    // Ưu tiên trạng thái disabled → xám
-                    if (!isHierarchyEnabled || isRoot)
-                        style.normal.textColor = new Color(0.5f, 0.5f, 0.5f);
-                    // Node không hợp lệ (MonoTaskNode thiếu taskDefinition) → đỏ
+                    if (!isEnabled || isRoot)
+                        _nodeNameStyle.normal.textColor = DisabledTextColor;
                     else if (node is MonoTaskNode mono && mono.taskDefinition == null)
-                        style.normal.textColor = new Color(1f, 0.25f, 0.25f);
+                        _nodeNameStyle.normal.textColor = ErrorTextColor;
                     else if (isSelected)
-                        style.normal.textColor = Color.white;
+                        _nodeNameStyle.normal.textColor = Color.white;
+                    else
+                        _nodeNameStyle.normal.textColor = _labelStyle.normal.textColor;
 
-                    GUI.Label(labelRect, displayName, style);
+                    GUI.Label(new Rect(nameX, y, nameW, RowHeight), displayName, _nodeNameStyle);
                 }
             }
 
-            // ── Mouse events on this row ──
+            // Mouse events on row
             if (e.type == EventType.MouseDown && rowRect.Contains(e.mousePosition))
             {
                 if (e.button == 0)
                 {
                     if (_renamingNode != node) CommitRename();
 
-                    // Double-click → start rename
                     if (e.clickCount == 2 && node == _selected)
-                    { StartRename(node); e.Use(); }
+                    {
+                        StartRename(node);
+                        e.Use();
+                    }
                     else
                     {
                         _selected = node;
-                        GUI.FocusControl(null);
-                        // Start drag tracking
+                        ClearTextFieldFocus();
+                        // Bắt đầu track drag (threshold check ở HandleDragInHierarchy)
                         _dragActive   = false;
                         _dragStartPos = e.mousePosition;
                         _draggedNode  = node;
@@ -451,26 +591,12 @@ namespace Hlight.Structures.CompositeTask.Editor
                 else if (e.button == 1)
                 {
                     if (_selected != node) { _selected = node; Repaint(); }
-                    // Context menu is handled at scroll-view level
-                }
-            }
-
-            // Drag start detection — do NOT call e.Use() here so HandleDragInHierarchy()
-            // (called before drawing) can also process MouseDrag to update the drop target.
-            if (e.type == EventType.MouseDrag && _draggedNode == node && !_dragActive)
-            {
-                float distSq = ((Vector2)e.mousePosition - _dragStartPos).sqrMagnitude;
-                if (distSq > DragThreshSq)
-                {
-                    _dragActive = true;
-                    _dropValid  = false;
-                    // Do NOT e.Use() — HandleDragInHierarchy() will handle the drag
                 }
             }
 
             y += RowHeight;
 
-            // ── Children (recursive) ──
+            // Children (recursive)
             if (node is CompositeTaskNode composite && IsExpanded(composite) && composite.children != null)
             {
                 for (int i = 0; i < composite.children.Count; i++)
@@ -482,7 +608,8 @@ namespace Hlight.Structures.CompositeTask.Editor
             }
         }
 
-        // ── Hit test ─────────────────────────────────────────────────────
+        // ── Hit test ──
+
         ATaskNode HitTestNode(ATaskNode node, Vector2 localPos, float startY)
         {
             return HitTestRec(node, localPos, ref startY);
@@ -491,6 +618,7 @@ namespace Hlight.Structures.CompositeTask.Editor
         ATaskNode HitTestRec(ATaskNode node, Vector2 pos, ref float y)
         {
             if (node == null) return null;
+            if (!IsVisibleBySearch(node)) return null;
             var rowRect = new Rect(0, y, 10000, RowHeight);
             y += RowHeight;
             if (rowRect.Contains(pos)) return node;
@@ -504,17 +632,16 @@ namespace Hlight.Structures.CompositeTask.Editor
             return null;
         }
 
-        // ── Drop indicator line ───────────────────────────────────────────
+        // ── Drop indicator ──
+
         void DrawDropIndicator(Rect hierarchyRect, Rect scrollRect)
         {
-            // Compute Y of drop position
             float y    = 0;
             float lineY = ComputeDropLineY(_taskTree.Root, null, -1, ref y);
             if (lineY < 0) return;
             float absY = scrollRect.y + lineY - _hierarchyScroll.y;
             if (absY < scrollRect.y || absY > scrollRect.yMax) return;
-            EditorGUI.DrawRect(new Rect(scrollRect.x + 4, absY - 1, scrollRect.width - 8, 2),
-                new Color(0.35f, 0.8f, 1f));
+            EditorGUI.DrawRect(new Rect(scrollRect.x + 4, absY - 1, scrollRect.width - 8, 2), DropLineColor);
         }
 
         float ComputeDropLineY(ATaskNode node, CompositeTaskNode parent, int indexInParent, ref float y)
@@ -532,19 +659,57 @@ namespace Hlight.Structures.CompositeTask.Editor
                     float result = ComputeDropLineY(ch.taskNode, comp, i, ref y);
                     if (result >= 0) return result;
                 }
-                // After last child
                 if (_dropParentTarget == comp && _dropInsertIndex == (comp.children?.Count ?? 0))
                     return y;
             }
             return -1;
         }
 
-        // ── Drag handling (MouseMove / MouseDrag / MouseUp on whole window) ──
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  DRAG & DROP
+        // ══════════════════════════════════════════════════════════════════
+
+        #region DragDrop
+
         void HandleDragInHierarchy()
         {
-            if (!_dragActive || _draggedNode == null) return;
+            if (_draggedNode == null) return;
             var e = Event.current;
 
+            // MouseUp khi chưa drag (click thường) → clear tracking
+            if (!_dragActive && e.type == EventType.MouseUp)
+            {
+                _draggedNode = null;
+                return;
+            }
+
+            // MouseDown ngoài hierarchy → hủy drag tracking
+            if (e.type == EventType.MouseDown && !_hierarchyScrollRect.Contains(e.mousePosition))
+            {
+                CancelDrag();
+                return;
+            }
+
+            // Phase 1: Detect drag start (threshold check)
+            if (!_dragActive && e.type == EventType.MouseDrag)
+            {
+                if (!_hierarchyScrollRect.Contains(e.mousePosition))
+                {
+                    CancelDrag();
+                    return;
+                }
+                if (((Vector2)e.mousePosition - _dragStartPos).sqrMagnitude > DragThreshSq)
+                {
+                    _dragActive = true;
+                    _dropValid  = false;
+                }
+            }
+
+            if (!_dragActive) return;
+
+            // Phase 2: Active drag
             if (e.type == EventType.MouseDrag || e.type == EventType.MouseMove)
             {
                 UpdateDropTarget(e.mousePosition);
@@ -553,25 +718,25 @@ namespace Hlight.Structures.CompositeTask.Editor
             }
             else if (e.type == EventType.MouseUp)
             {
-                if (e.button == 0)
-                {
-                    if (_dropValid) PerformDrop();
-                }
-                _dragActive  = false;
-                _draggedNode = null;
-                _dropValid   = false;
+                if (e.button == 0 && _dropValid)
+                    PerformDrop();
+                CancelDrag();
                 Repaint();
                 e.Use();
             }
         }
 
+        void CancelDrag()
+        {
+            _dragActive  = false;
+            _draggedNode = null;
+            _dropValid   = false;
+        }
+
         void UpdateDropTarget(Vector2 mousePos)
         {
             if (_taskTree == null || _taskTree.Root == null) return;
-
-            // Chuyển mousePos (screen space) về tọa độ local trong content ScrollView
-            var localY = mousePos.y - _hierarchyScrollRect.y + _hierarchyScroll.y;
-
+            var localY = ScreenToScrollLocal(mousePos).y;
             float y = 0f;
             _dropValid = false;
             FindDropTarget(_taskTree.Root, null, -1, ref y, localY);
@@ -582,13 +747,11 @@ namespace Hlight.Structures.CompositeTask.Editor
         {
             if (node == null) return;
             float rowTop = y;
-            float rowBot = y + RowHeight;
             y += RowHeight;
 
-            // Upper half of row → insert before this node
+            // Upper half → insert before
             if (mouseY >= rowTop && mouseY < rowTop + RowHeight * 0.5f)
             {
-                // Can only drop as sibling (need parent)
                 if (parent != null && _draggedNode != node && !IsAncestorOrSelf(_draggedNode, parent))
                 {
                     _dropParentTarget = parent;
@@ -596,13 +759,12 @@ namespace Hlight.Structures.CompositeTask.Editor
                     _dropValid        = true;
                 }
             }
-            // Lower half → insert after OR into composite
-            else if (mouseY >= rowTop + RowHeight * 0.5f && mouseY < rowBot)
+            // Lower half → insert into (if composite & expanded) or after
+            else if (mouseY >= rowTop + RowHeight * 0.5f && mouseY < rowTop + RowHeight)
             {
                 if (node is CompositeTaskNode comp && IsExpanded(comp) && _draggedNode != node &&
                     !IsAncestorOrSelf(_draggedNode, comp))
                 {
-                    // Drop into composite as first child
                     _dropParentTarget = comp;
                     _dropInsertIndex  = 0;
                     _dropValid        = true;
@@ -628,10 +790,7 @@ namespace Hlight.Structures.CompositeTask.Editor
         {
             if (_dropParentTarget == null || _draggedNode == null) return;
 
-            // Find current parent of dragged node
             FindParent(_taskTree.Root, _draggedNode, out var oldParent, out int oldIdx);
-
-            // Avoid no-op
             if (oldParent == _dropParentTarget && oldIdx == _dropInsertIndex) return;
 
             Undo.RegisterCompleteObjectUndo(_taskTree, "Move Node");
@@ -641,7 +800,6 @@ namespace Hlight.Structures.CompositeTask.Editor
             {
                 sv = oldParent.children[oldIdx].subTaskValue;
                 oldParent.children.RemoveAt(oldIdx);
-                // Adjust insertIndex if same parent and removing shifts target
                 if (oldParent == _dropParentTarget && oldIdx < _dropInsertIndex)
                     _dropInsertIndex--;
             }
@@ -655,41 +813,18 @@ namespace Hlight.Structures.CompositeTask.Editor
                 taskNode     = _draggedNode,
             });
 
+            PurgeExpandedDict();
             SetDirty();
-            Repaint();
         }
 
-        // ── Expand/collapse helpers ───────────────────────────────────────
-        bool IsExpanded(CompositeTaskNode node)
-        {
-            if (!_expanded.TryGetValue(node, out bool v)) { _expanded[node] = true; return true; }
-            return v;
-        }
-        void SetExpanded(CompositeTaskNode node, bool value) => _expanded[node] = value;
+        #endregion
 
-        // ── Rename ────────────────────────────────────────────────────────
-        void StartRename(ATaskNode node)
-        {
-            CommitRename();
-            _renamingNode      = node;
-            _renameBuffer      = node.name ?? "";
-            _focusRenameField  = true;
-            Repaint();
-        }
+        // ══════════════════════════════════════════════════════════════════
+        //  CONTEXT MENU
+        // ══════════════════════════════════════════════════════════════════
 
-        void CommitRename()
-        {
-            if (_renamingNode == null) return;
-            Undo.RegisterCompleteObjectUndo(_taskTree, "Rename Node");
-            _renamingNode.name = _renameBuffer;
-            SetDirty();
-            _renamingNode = null;
-            Repaint();
-        }
+        #region ContextMenu
 
-        void CancelRename() { _renamingNode = null; Repaint(); }
-
-        // ── Context menu ──────────────────────────────────────────────────
         void ShowContextMenu(ATaskNode hitNode)
         {
             var menu = new GenericMenu();
@@ -697,10 +832,11 @@ namespace Hlight.Structures.CompositeTask.Editor
             if (_taskTree.Root == null)
             {
                 menu.AddItem(new GUIContent("Create Root Composite (Sequential)"), false,
-                    () => { CreateRoot(ExecutionMode.Sequential); });
+                    () => CreateRoot(ExecutionMode.Sequential));
                 menu.AddItem(new GUIContent("Create Root Composite (Parallel)"), false,
-                    () => { CreateRoot(ExecutionMode.Parallel); });
-                menu.ShowAsContext(); return;
+                    () => CreateRoot(ExecutionMode.Parallel));
+                menu.ShowAsContext();
+                return;
             }
 
             ATaskNode target = hitNode ?? _selected;
@@ -714,33 +850,213 @@ namespace Hlight.Structures.CompositeTask.Editor
                 menu.AddItem(new GUIContent("Add Child/Composite (Parallel)"), false,
                     () => AddCompositeChild(comp, ExecutionMode.Parallel));
                 menu.AddSeparator("");
+                menu.AddItem(new GUIContent("Expand All Children"), false, () => ExpandAll(comp));
+                menu.AddItem(new GUIContent("Collapse All Children"), false, () => CollapseAll(comp));
+                menu.AddSeparator("");
             }
 
             if (target != null)
             {
-                // Root: không cho Delete
                 bool isRoot = _taskTree != null && target == _taskTree.Root;
 
-                menu.AddItem(new GUIContent("Rename"), false, () => StartRename(target));
+                menu.AddItem(new GUIContent("Rename        F2"), false, () => StartRename(target));
                 menu.AddSeparator("");
-                menu.AddItem(new GUIContent("Duplicate"), false, () => DuplicateNode(target));
-                menu.AddItem(new GUIContent("Copy"), false, () => _clipboard = target);
+                menu.AddItem(new GUIContent("Duplicate     Ctrl+D"), false, () => DuplicateNode(target));
+                menu.AddItem(new GUIContent("Copy          Ctrl+C"), false, () => _clipboard = target);
                 if (_clipboard != null && target is CompositeTaskNode compPaste)
-                    menu.AddItem(new GUIContent("Paste as Child"), false, () => PasteChild(compPaste));
+                    menu.AddItem(new GUIContent("Paste as Child  Ctrl+V"), false, () => PasteChild(compPaste));
                 else
-                    menu.AddDisabledItem(new GUIContent("Paste as Child"));
+                    menu.AddDisabledItem(new GUIContent("Paste as Child  Ctrl+V"));
                 menu.AddSeparator("");
 
                 if (isRoot)
-                    menu.AddDisabledItem(new GUIContent("Delete Root (disabled)"));
+                    menu.AddDisabledItem(new GUIContent("Delete        Del"));
                 else
-                    menu.AddItem(new GUIContent("Delete"), false, () => DeleteNode(target));
+                    menu.AddItem(new GUIContent("Delete        Del"), false, () => DeleteNode(target));
             }
 
             menu.ShowAsContext();
         }
 
-        // ── Mutations ─────────────────────────────────────────────────────
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  KEYBOARD SHORTCUTS
+        // ══════════════════════════════════════════════════════════════════
+
+        #region Keyboard
+
+        void HandleKeyboard()
+        {
+            if (_taskTree == null || _taskTree.Root == null) return;
+            var e = Event.current;
+            if (e.type != EventType.KeyDown) return;
+
+            // Khi đang rename → chỉ xử lý Enter/Escape, key khác để TextField xử lý
+            if (_renamingNode != null)
+            {
+                if (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter)
+                { CommitRename(); e.Use(); }
+                else if (e.keyCode == KeyCode.Escape)
+                { CancelRename(); e.Use(); }
+                return;
+            }
+
+            // Đang gõ text field (search bar, inspector...) → không xử lý shortcuts
+            if (EditorGUIUtility.editingTextField) return;
+
+            bool ctrl = e.control || e.command;
+
+            if (_selected == null)
+            {
+                _selected = _taskTree.Root;
+                Repaint();
+            }
+
+            var visible = new List<ATaskNode>();
+            BuildVisibleList(_taskTree.Root, visible);
+            int curIndex = visible.IndexOf(_selected);
+
+            // Delete (chỉ phím Delete)
+            if (e.keyCode == KeyCode.Delete)
+            { DeleteNode(_selected); e.Use(); return; }
+
+            // Duplicate
+            if (ctrl && e.keyCode == KeyCode.D)
+            { DuplicateNode(_selected); e.Use(); return; }
+
+            // Copy / Paste
+            if (ctrl && e.keyCode == KeyCode.C)
+            { _clipboard = _selected; e.Use(); return; }
+
+            if (ctrl && e.keyCode == KeyCode.V && _selected is CompositeTaskNode cv)
+            { PasteChild(cv); e.Use(); return; }
+
+            // Rename (F2)
+            if (e.keyCode == KeyCode.F2)
+            { StartRename(_selected); e.Use(); return; }
+
+            // Expand/Collapse All: Alt+Left / Alt+Right
+            if (e.alt && e.keyCode == KeyCode.LeftArrow)
+            { CollapseAll(_taskTree.Root); e.Use(); return; }
+            if (e.alt && e.keyCode == KeyCode.RightArrow)
+            { ExpandAll(_taskTree.Root); e.Use(); return; }
+
+            // Navigate Up/Down
+            if (curIndex >= 0)
+            {
+                if (e.keyCode == KeyCode.UpArrow)
+                {
+                    if (curIndex > 0) { _selected = visible[curIndex - 1]; Repaint(); }
+                    e.Use(); return;
+                }
+                if (e.keyCode == KeyCode.DownArrow)
+                {
+                    if (curIndex < visible.Count - 1) { _selected = visible[curIndex + 1]; Repaint(); }
+                    e.Use(); return;
+                }
+            }
+
+            // Left: collapse or go to parent
+            if (e.keyCode == KeyCode.LeftArrow)
+            {
+                if (_selected is CompositeTaskNode comp && IsExpanded(comp))
+                    SetExpanded(comp, false);
+                else
+                {
+                    FindParent(_taskTree.Root, _selected, out var parent, out _);
+                    if (parent != null) _selected = parent;
+                }
+                Repaint(); e.Use(); return;
+            }
+
+            // Right: expand or go to first child
+            if (e.keyCode == KeyCode.RightArrow)
+            {
+                if (_selected is CompositeTaskNode comp)
+                {
+                    if (!IsExpanded(comp))
+                        SetExpanded(comp, true);
+                    else if (comp.children != null && comp.children.Count > 0)
+                    {
+                        var firstChild = comp.children[0].taskNode;
+                        if (firstChild != null) _selected = firstChild;
+                    }
+                }
+                Repaint(); e.Use();
+            }
+        }
+
+        void BuildVisibleList(ATaskNode node, List<ATaskNode> list)
+        {
+            if (node == null || !IsVisibleBySearch(node)) return;
+            list.Add(node);
+            if (node is CompositeTaskNode comp && IsExpanded(comp) && comp.children != null)
+                foreach (var ch in comp.children)
+                    if (ch?.taskNode != null)
+                        BuildVisibleList(ch.taskNode, list);
+        }
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  RENAME
+        // ══════════════════════════════════════════════════════════════════
+
+        #region Rename
+
+        void StartRename(ATaskNode node)
+        {
+            CommitRename();
+            _renamingNode     = node;
+            _renameBuffer     = node.name ?? "";
+            _focusRenameField = true;
+            Repaint();
+        }
+
+        void CommitRename()
+        {
+            if (_renamingNode == null) return;
+
+            var trimmed = _renameBuffer?.Trim();
+            if (!string.IsNullOrEmpty(trimmed))
+            {
+                Undo.RegisterCompleteObjectUndo(_taskTree, "Rename Node");
+                _renamingNode.name = trimmed;
+                SetDirty();
+            }
+
+            _renamingNode = null;
+            ClearTextFieldFocus();
+            Repaint();
+        }
+
+        void CancelRename()
+        {
+            _renamingNode = null;
+            ClearTextFieldFocus();
+            Repaint();
+        }
+
+        /// <summary>
+        /// Clear keyboard control ID + editingTextField flag.
+        /// Cần clear thủ công cả hai vì khi TextField bị xóa (không còn được vẽ),
+        /// Unity IMGUI không tự reset editingTextField.
+        /// </summary>
+        static void ClearTextFieldFocus()
+        {
+            GUIUtility.keyboardControl = 0;
+            EditorGUIUtility.editingTextField = false;
+        }
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  MUTATIONS
+        // ══════════════════════════════════════════════════════════════════
+
+        #region Mutations
+
         void CreateRoot(ExecutionMode mode)
         {
             Undo.RegisterCompleteObjectUndo(_taskTree, "Create Root");
@@ -762,7 +1078,6 @@ namespace Hlight.Structures.CompositeTask.Editor
             var node = new MonoTaskNode { name = "New Mono Task" };
             parent.children.Add(new CompositeTaskNode.Child { subTaskValue = 1f, taskNode = node });
             SetExpanded(parent, true);
-            _selected = node;
             SetDirty();
         }
 
@@ -779,46 +1094,41 @@ namespace Hlight.Structures.CompositeTask.Editor
             parent.children.Add(new CompositeTaskNode.Child { subTaskValue = 1f, taskNode = node });
             SetExpanded(parent, true);
             SetExpanded(node, true);
-            _selected = node;
             SetDirty();
         }
 
         void DeleteNode(ATaskNode node)
         {
-            if (node == null) return;
-
-            // Find parent
-            if (node == _taskTree.Root)
-            {
-                // Root không thể xóa – giữ nguyên, chỉ repaint để user thấy không có gì xảy ra
-                Repaint();
-                return;
-            }
+            if (node == null || node == _taskTree.Root) return;
 
             FindParent(_taskTree.Root, node, out var parent, out int idx);
             if (parent == null) return;
+
             Undo.RegisterCompleteObjectUndo(_taskTree, "Delete Node");
             parent.children.RemoveAt(idx);
-            if (_selected == node) _selected = parent;
+
+            if (_selected == node || (_selected != null && IsDescendant(node, _selected)))
+                _selected = parent;
+
+            PurgeExpandedDict();
             SetDirty();
         }
 
         void DuplicateNode(ATaskNode node)
         {
-            if (node == null) return;
-            if (node == _taskTree.Root) return; // can't duplicate root
+            if (node == null || node == _taskTree.Root) return;
 
             FindParent(_taskTree.Root, node, out var parent, out int idx);
             if (parent == null) return;
+
             var clone = DeepClone(node);
             Undo.RegisterCompleteObjectUndo(_taskTree, "Duplicate Node");
             parent.children.Insert(idx + 1, new CompositeTaskNode.Child
             {
-                enabled     = parent.children[idx].enabled,
+                enabled      = parent.children[idx].enabled,
                 subTaskValue = parent.children[idx].subTaskValue,
                 taskNode     = clone,
             });
-            // Đặt tên theo format Unity Hierarchy: "Name (1)", "Name (2)", ...
             clone.name = MakeUniqueSiblingName(parent, node.name);
             _selected = clone;
             SetDirty();
@@ -828,26 +1138,23 @@ namespace Hlight.Structures.CompositeTask.Editor
         {
             if (_clipboard == null) return;
             var clone = DeepClone(_clipboard);
+
             Undo.RegisterCompleteObjectUndo(_taskTree, "Paste Node");
             if (parent.children == null) parent.children = new List<CompositeTaskNode.Child>();
-            
-            // Cố gắng bảo tồn trạng thái enabled từ parent cũ nếu có
+
             bool enabled = true;
-            if (_taskTree != null && _taskTree.Root != null)
+            if (_taskTree?.Root != null)
             {
                 FindParent(_taskTree.Root, _clipboard, out var oldParent, out int oldIdx);
-                if (oldParent != null && oldParent.children != null &&
-                    oldIdx >= 0 && oldIdx < oldParent.children.Count)
-                {
+                if (oldParent?.children != null && oldIdx >= 0 && oldIdx < oldParent.children.Count)
                     enabled = oldParent.children[oldIdx].enabled;
-                }
             }
 
             parent.children.Add(new CompositeTaskNode.Child
             {
-                enabled     = enabled,
+                enabled      = enabled,
                 subTaskValue = 1f,
-                taskNode     = clone
+                taskNode     = clone,
             });
             SetExpanded(parent, true);
             clone.name = MakeUniqueSiblingName(parent, _clipboard.name);
@@ -855,7 +1162,506 @@ namespace Hlight.Structures.CompositeTask.Editor
             SetDirty();
         }
 
-        // ── Helpers ───────────────────────────────────────────────────────
+        void ExpandAll(ATaskNode node)
+        {
+            if (node is CompositeTaskNode comp)
+            {
+                SetExpanded(comp, true);
+                if (comp.children != null)
+                    foreach (var ch in comp.children)
+                        if (ch?.taskNode != null)
+                            ExpandAll(ch.taskNode);
+            }
+            Repaint();
+        }
+
+        void CollapseAll(ATaskNode node)
+        {
+            if (node is CompositeTaskNode comp)
+            {
+                SetExpanded(comp, false);
+                if (comp.children != null)
+                    foreach (var ch in comp.children)
+                        if (ch?.taskNode != null)
+                            CollapseAll(ch.taskNode);
+            }
+            Repaint();
+        }
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  INSPECTOR PANEL
+        // ══════════════════════════════════════════════════════════════════
+
+        #region Inspector
+
+        void DrawInspector(Rect rect)
+        {
+            // Validate selection vẫn còn trong tree
+            if (_selected != null && _taskTree?.Root != null)
+            {
+                if (_selected != _taskTree.Root && !IsDescendant(_taskTree.Root, _selected))
+                    _selected = null;
+            }
+
+            if (_selected == null) return;
+
+            EditorGUI.DrawRect(rect, InspectorBg);
+
+            var headerRect = new Rect(rect.x, rect.y, rect.width, PanelHeaderHeight);
+            EditorGUI.DrawRect(headerRect, PanelHeaderBg);
+            GUI.Label(headerRect, "  Inspector", _headerStyle);
+
+            var bodyRect = new Rect(rect.x, rect.y + PanelHeaderHeight, rect.width, rect.height - PanelHeaderHeight);
+            GUILayout.BeginArea(bodyRect);
+            _inspectorScroll = GUILayout.BeginScrollView(_inspectorScroll);
+
+            DrawInspectorContent(_selected);
+
+            GUILayout.EndScrollView();
+            GUILayout.EndArea();
+        }
+
+        void DrawInspectorContent(ATaskNode node)
+        {
+            string typeLabel = node switch
+            {
+                CompositeTaskNode => "[Composite]",
+                MonoTaskNode      => "[MonoTask]",
+                _                 => "[Unknown]",
+            };
+            EditorGUILayout.LabelField($"{typeLabel}  {node.name}", EditorStyles.boldLabel);
+            GUILayout.Space(4);
+            SeparatorLine();
+            GUILayout.Space(6);
+
+            if (node is MonoTaskNode mono)
+                DrawMonoInspector(mono);
+            else if (node is CompositeTaskNode comp)
+                DrawCompositeInspector(comp);
+
+            // Runtime (Play Mode)
+            if (Application.isPlaying)
+            {
+                GUILayout.Space(8);
+                SeparatorLine();
+                GUILayout.Space(6);
+                SectionHeader("Runtime");
+                GUILayout.Space(4);
+                DrawRuntimeInspector(node);
+            }
+
+            GUILayout.Space(16);
+        }
+
+        void DrawMonoInspector(MonoTaskNode mono)
+        {
+            var types = GetTaskDefinitionTypes(out var names);
+
+            int curIdx = IndexOfType(types, mono.taskDefinition?.GetType());
+
+            EditorGUILayout.LabelField("Task Definition:", EditorStyles.boldLabel);
+
+            if (types.Length == 0)
+            {
+                EditorGUILayout.HelpBox(
+                    "No ITaskDefinition implementations found in current TaskDefinitionDatabase.",
+                    MessageType.Info);
+                return;
+            }
+
+            var options = new string[names.Length + 1];
+            options[0] = "None";
+            Array.Copy(names, 0, options, 1, names.Length);
+
+            int popupIndex = mono.taskDefinition == null ? 0 : (curIdx >= 0 ? curIdx + 1 : 0);
+            int newPopupIndex = EditorGUILayout.Popup("Type", popupIndex, options);
+
+            if (newPopupIndex != popupIndex)
+            {
+                Undo.RegisterCompleteObjectUndo(_taskTree, "Change taskDefinition");
+
+                if (newPopupIndex == 0)
+                {
+                    mono.taskDefinition = null;
+                }
+                else
+                {
+                    int typeIndex = newPopupIndex - 1;
+                    if (typeIndex >= 0 && typeIndex < types.Length)
+                    {
+                        try
+                        {
+                            mono.taskDefinition = (ITaskDefinition)Activator.CreateInstance(types[typeIndex]);
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogError($"Failed to create ITaskDefinition of type {types[typeIndex].Name}: {ex.Message}");
+                            mono.taskDefinition = null;
+                        }
+                    }
+                }
+                SetDirty();
+                // Refresh vì data thay đổi ngoài SerializedProperty
+                RebuildSerializedObject();
+#if ODIN_INSPECTOR
+                DisposeOdinTaskDefTree();
+#endif
+            }
+
+            if (mono.taskDefinition != null)
+            {
+                GUILayout.Space(6);
+                DrawTaskDefinitionFields(mono);
+            }
+        }
+
+        Type[] GetTaskDefinitionTypes(out string[] displayNames)
+        {
+            displayNames = Array.Empty<string>();
+            if (_taskDefinitionDatabase == null || _taskDefinitionDatabase.entries == null)
+                return Array.Empty<Type>();
+
+            var typeList = new List<Type>();
+            var nameList = new List<string>();
+
+            foreach (var entry in _taskDefinitionDatabase.entries)
+            {
+                if (entry?.script == null) continue;
+                var type = entry.script.GetClass();
+                if (type == null || type.IsAbstract || type.IsInterface) continue;
+                if (!typeof(ITaskDefinition).IsAssignableFrom(type)) continue;
+
+                typeList.Add(type);
+                nameList.Add(string.IsNullOrEmpty(entry.displayName) ? type.Name : entry.displayName);
+            }
+
+            displayNames = nameList.ToArray();
+            return typeList.ToArray();
+        }
+
+        static int IndexOfType(Type[] types, Type t)
+        {
+            if (types == null || t == null) return -1;
+            for (int i = 0; i < types.Length; i++)
+                if (types[i] == t) return i;
+            return -1;
+        }
+
+        void DrawCompositeInspector(CompositeTaskNode comp)
+        {
+            EditorGUI.BeginChangeCheck();
+            var newMode = (ExecutionMode)EditorGUILayout.EnumPopup("Execution Mode", comp.executionMode);
+            if (EditorGUI.EndChangeCheck())
+            {
+                Undo.RegisterCompleteObjectUndo(_taskTree, "Change executionMode");
+                comp.executionMode = newMode;
+                SetDirty();
+            }
+
+            GUILayout.Space(8);
+            EditorGUILayout.LabelField($"Children ({comp.children?.Count ?? 0})", EditorStyles.boldLabel);
+
+            if (comp.children != null)
+            {
+                for (int i = 0; i < comp.children.Count; i++)
+                {
+                    var child = comp.children[i];
+                    if (child?.taskNode == null) continue;
+
+                    int ci = i;
+                    GUILayout.BeginHorizontal();
+
+                    // Enabled toggle
+                    EditorGUI.BeginChangeCheck();
+                    bool newEnabled = GUILayout.Toggle(child.enabled, GUIContent.none, GUILayout.Width(18));
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        Undo.RegisterCompleteObjectUndo(_taskTree, "Toggle Child Enabled");
+                        comp.children[ci].enabled = newEnabled;
+                        SetDirty();
+                    }
+
+                    // Name
+                    EditorGUI.BeginChangeCheck();
+                    string childName = EditorGUILayout.TextField(child.taskNode.name ?? string.Empty);
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        Undo.RegisterCompleteObjectUndo(_taskTree, "Rename Child Node");
+                        child.taskNode.name = childName;
+                        SetDirty();
+                    }
+
+                    // subTaskValue
+                    EditorGUI.BeginChangeCheck();
+                    float newSv = EditorGUILayout.FloatField(child.subTaskValue, GUILayout.Width(48));
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        Undo.RegisterCompleteObjectUndo(_taskTree, "Edit subTaskValue");
+                        comp.children[ci].subTaskValue = Mathf.Max(0f, newSv);
+                        SetDirty();
+                    }
+
+                    // Delete
+                    var oldColor = GUI.color;
+                    GUI.color = DeleteBtnColor;
+                    if (GUILayout.Button("✕", GUILayout.Width(22), GUILayout.Height(18)))
+                    {
+                        Undo.RegisterCompleteObjectUndo(_taskTree, "Remove Child");
+                        if (_selected == comp.children[ci].taskNode) _selected = comp;
+                        comp.children.RemoveAt(ci);
+                        PurgeExpandedDict();
+                        SetDirty();
+                        GUILayout.EndHorizontal();
+                        GUI.color = oldColor;
+                        break;
+                    }
+                    GUI.color = oldColor;
+                    GUILayout.EndHorizontal();
+                }
+            }
+
+            GUILayout.Space(6);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("+ Mono Task"))        AddMonoChild(comp);
+            if (GUILayout.Button("+ Composite Task"))   AddCompositeChild(comp, ExecutionMode.Sequential);
+            GUILayout.EndHorizontal();
+        }
+
+        void DrawRuntimeInspector(ATaskNode node)
+        {
+            Color statusColor = node.Status switch
+            {
+                TaskNodeStatus.Running   => StatusRunning,
+                TaskNodeStatus.Completed => StatusCompleted,
+                _                        => new Color(0.6f, 0.6f, 0.6f),
+            };
+            var oldColor = GUI.contentColor;
+            GUI.contentColor = statusColor;
+            EditorGUILayout.LabelField("Status", node.Status.ToString(), EditorStyles.boldLabel);
+            GUI.contentColor = oldColor;
+
+            EditorGUILayout.LabelField("Progress", $"{node.Progress * 100f:F1} %");
+            var progressRect = EditorGUILayout.GetControlRect(false, 16);
+            progressRect = EditorGUI.IndentedRect(progressRect);
+            EditorGUI.DrawRect(progressRect, PanelHeaderBg);
+            if (node.Progress > 0)
+                EditorGUI.DrawRect(
+                    new Rect(progressRect.x, progressRect.y,
+                             progressRect.width * node.Progress, progressRect.height),
+                    StatusRunning);
+
+            GUILayout.Space(8);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Force Complete"))           node.ForceComplete();
+            if (GUILayout.Button("Force Complete Immediate")) node.ForceCompleteImmediate();
+            if (GUILayout.Button("Reset"))                    node.Reset();
+            GUILayout.EndHorizontal();
+        }
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  TASK DEFINITION FIELD DRAWING
+        // ══════════════════════════════════════════════════════════════════
+
+        #region TaskDefinitionDrawing
+
+        /// <summary>
+        /// Vẽ các field của taskDefinition.
+        /// Odin (khi có): dùng PropertyTree để tận dụng Odin drawer.
+        /// Không Odin: dùng SerializedProperty / PropertyField mặc định của Unity.
+        /// </summary>
+        void DrawTaskDefinitionFields(MonoTaskNode mono)
+        {
+            if (mono.taskDefinition == null)
+            {
+#if ODIN_INSPECTOR
+                DisposeOdinTaskDefTree();
+#endif
+                return;
+            }
+
+#if ODIN_INSPECTOR
+            DrawTaskDefinitionFieldsOdin(mono);
+#else
+            DrawTaskDefinitionFieldsDefault(mono);
+#endif
+        }
+
+#if ODIN_INSPECTOR
+        void DrawTaskDefinitionFieldsOdin(MonoTaskNode mono)
+        {
+            // Tạo lại PropertyTree khi target thay đổi (chọn node khác hoặc đổi type)
+            if (_odinTaskDefTree == null || !ReferenceEquals(_odinTaskDefTarget, mono.taskDefinition))
+            {
+                DisposeOdinTaskDefTree();
+                _odinTaskDefTree = Sirenix.OdinInspector.Editor.PropertyTree.Create(mono.taskDefinition);
+                _odinTaskDefTarget = mono.taskDefinition;
+            }
+
+            EditorGUI.BeginChangeCheck();
+            _odinTaskDefTree.Draw(applyUndo: false);
+            if (EditorGUI.EndChangeCheck())
+            {
+                Undo.RegisterCompleteObjectUndo(_taskTree, "Edit TaskDefinition");
+                _odinTaskDefTree.ApplyChanges();
+                SetDirty();
+            }
+        }
+
+        void DisposeOdinTaskDefTree()
+        {
+            _odinTaskDefTree?.Dispose();
+            _odinTaskDefTree = null;
+            _odinTaskDefTarget = null;
+        }
+#endif
+
+        void DrawTaskDefinitionFieldsDefault(MonoTaskNode mono)
+        {
+            if (_serializedTaskTree == null) return;
+
+            _serializedTaskTree.Update();
+
+            string nodePath = FindNodePropertyPath(mono);
+            if (nodePath == null) return;
+
+            var taskDefProp = _serializedTaskTree.FindProperty(nodePath + ".taskDefinition");
+            if (taskDefProp == null) return;
+
+            EditorGUILayout.PropertyField(taskDefProp, true);
+
+            if (_serializedTaskTree.ApplyModifiedProperties())
+                SetDirty();
+        }
+
+        /// <summary>
+        /// Tìm property path từ root SerializedObject đến một ATaskNode.
+        /// Ví dụ: "&lt;Root&gt;k__BackingField.children.Array.data[0].taskNode"
+        /// </summary>
+        string FindNodePropertyPath(ATaskNode target)
+        {
+            if (_taskTree == null || _taskTree.Root == null) return null;
+
+            const string rootPath = "<Root>k__BackingField";
+            if (target == _taskTree.Root) return rootPath;
+
+            var pathParts = new List<string>();
+            if (FindNodePathRecursive(_taskTree.Root, target, pathParts))
+                return rootPath + string.Join("", pathParts);
+
+            return null;
+        }
+
+        bool FindNodePathRecursive(ATaskNode current, ATaskNode target, List<string> pathParts)
+        {
+            if (current is not CompositeTaskNode comp || comp.children == null) return false;
+
+            for (int i = 0; i < comp.children.Count; i++)
+            {
+                var child = comp.children[i];
+                if (child?.taskNode == null) continue;
+
+                pathParts.Add($".children.Array.data[{i}].taskNode");
+
+                if (child.taskNode == target) return true;
+                if (FindNodePathRecursive(child.taskNode, target, pathParts)) return true;
+
+                pathParts.RemoveAt(pathParts.Count - 1);
+            }
+            return false;
+        }
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  DEEP CLONE
+        // ══════════════════════════════════════════════════════════════════
+
+        #region DeepClone
+
+        static ATaskNode DeepClone(ATaskNode src)
+        {
+            if (src is MonoTaskNode m)
+                return new MonoTaskNode
+                {
+                    name                      = m.name,
+                    targetProgressToComplete   = m.targetProgressToComplete,
+                    taskDefinition             = CopyTaskDefinition(m.taskDefinition),
+                };
+            if (src is CompositeTaskNode c)
+            {
+                var clone = new CompositeTaskNode
+                {
+                    name                      = c.name,
+                    targetProgressToComplete   = c.targetProgressToComplete,
+                    executionMode              = c.executionMode,
+                    children                   = new List<CompositeTaskNode.Child>(),
+                };
+                if (c.children != null)
+                    foreach (var ch in c.children)
+                        if (ch?.taskNode != null)
+                            clone.children.Add(new CompositeTaskNode.Child
+                            {
+                                enabled      = ch.enabled,
+                                subTaskValue = ch.subTaskValue,
+                                taskNode     = DeepClone(ch.taskNode),
+                            });
+                return clone;
+            }
+            return null;
+        }
+
+        static ITaskDefinition CopyTaskDefinition(ITaskDefinition source)
+        {
+            if (source == null) return null;
+            var type = source.GetType();
+
+            ITaskDefinition clone;
+            try { clone = (ITaskDefinition)Activator.CreateInstance(type); }
+            catch (Exception ex)
+            {
+                Debug.LogError($"Failed to create instance of {type.Name}: {ex.Message}");
+                return null;
+            }
+
+            foreach (var field in type.GetFields(
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            {
+                var value = field.GetValue(source);
+                if (value == null) { field.SetValue(clone, null); continue; }
+
+                if (field.FieldType.IsArray && value is Array arr)
+                {
+                    field.SetValue(clone, arr.Clone());
+                }
+                else if (field.FieldType.IsGenericType &&
+                         field.FieldType.GetGenericTypeDefinition() == typeof(List<>))
+                {
+                    var listType = typeof(List<>).MakeGenericType(field.FieldType.GetGenericArguments());
+                    var newList = (System.Collections.IList)Activator.CreateInstance(listType);
+                    foreach (var item in (System.Collections.IEnumerable)value)
+                        newList.Add(item);
+                    field.SetValue(clone, newList);
+                }
+                else
+                {
+                    field.SetValue(clone, value);
+                }
+            }
+            return clone;
+        }
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  TREE TRAVERSAL HELPERS
+        // ══════════════════════════════════════════════════════════════════
+
+        #region Helpers
+
         static bool IsAncestorOrSelf(ATaskNode candidate, ATaskNode target)
         {
             if (candidate == target) return true;
@@ -865,23 +1671,14 @@ namespace Hlight.Structures.CompositeTask.Editor
             return false;
         }
 
-        // Một node được xem là "enabled" trong Hierarchy nếu toàn bộ chuỗi cha của nó
-        // đều có Child.enabled = true (giống cách GameObject bị disable theo cha).
-        bool IsNodeHierarchyEnabled(ATaskNode node)
+        static bool IsDescendant(ATaskNode root, ATaskNode target)
         {
-            if (node == null || _taskTree == null || _taskTree.Root == null) return true;
-            if (node == _taskTree.Root) return true;
-
-            FindParent(_taskTree.Root, node, out var parent, out int index);
-            if (parent == null) return true;
-
-            var child = parent.children != null && index >= 0 && index < parent.children.Count
-                ? parent.children[index]
-                : null;
-
-            if (child == null || !child.enabled) return false;
-
-            return IsNodeHierarchyEnabled(parent);
+            if (root == target) return true;
+            if (root is CompositeTaskNode comp && comp.children != null)
+                foreach (var ch in comp.children)
+                    if (ch?.taskNode != null && IsDescendant(ch.taskNode, target))
+                        return true;
+            return false;
         }
 
         static void FindParent(ATaskNode root, ATaskNode target,
@@ -889,26 +1686,6 @@ namespace Hlight.Structures.CompositeTask.Editor
         {
             parent = null; index = -1;
             FindParentRec(root, target, ref parent, ref index);
-        }
-
-        // Tạo tên unique cho sibling dùng API Unity (ObjectNames.GetUniqueName)
-        static string MakeUniqueSiblingName(CompositeTaskNode parent, string originalName)
-        {
-            if (parent == null || parent.children == null)
-                return originalName;
-
-            if (string.IsNullOrEmpty(originalName))
-                originalName = "New Task";
-
-            // Thu thập tên sibling hiện có
-            var names = new List<string>();
-            foreach (var ch in parent.children)
-            {
-                if (ch?.taskNode != null && !string.IsNullOrEmpty(ch.taskNode.name))
-                    names.Add(ch.taskNode.name);
-            }
-
-            return ObjectNames.GetUniqueName(names.ToArray(), originalName);
         }
 
         static bool FindParentRec(ATaskNode node, ATaskNode target,
@@ -925,54 +1702,145 @@ namespace Hlight.Structures.CompositeTask.Editor
             return false;
         }
 
-        static ATaskNode DeepClone(ATaskNode src)
+        static string MakeUniqueSiblingName(CompositeTaskNode parent, string originalName)
         {
-            if (src is MonoTaskNode m)
-                return new MonoTaskNode { name = m.name, taskDefinition = m.taskDefinition };
-            if (src is CompositeTaskNode c)
-            {
-                var clone = new CompositeTaskNode
-                {
-                    name          = c.name,
-                    executionMode = c.executionMode,
-                    children      = new List<CompositeTaskNode.Child>(),
-                };
-                if (c.children != null)
-                    foreach (var ch in c.children)
-                        if (ch?.taskNode != null)
-                            clone.children.Add(new CompositeTaskNode.Child
-                            {
-                                subTaskValue = ch.subTaskValue,
-                                taskNode     = DeepClone(ch.taskNode),
-                            });
-                return clone;
-            }
-            return null;
+            if (parent?.children == null) return originalName;
+            if (string.IsNullOrEmpty(originalName)) originalName = "New Task";
+
+            var names = new List<string>();
+            foreach (var ch in parent.children)
+                if (ch?.taskNode != null && !string.IsNullOrEmpty(ch.taskNode.name))
+                    names.Add(ch.taskNode.name);
+
+            return ObjectNames.GetUniqueName(names.ToArray(), originalName);
         }
 
-        void SetDirty()
+        bool IsExpanded(CompositeTaskNode node)
         {
-            if (_taskTree == null) return;
-            EditorUtility.SetDirty(_taskTree);
-            UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(_taskTree.gameObject.scene);
-            Repaint();
+            if (!_expanded.TryGetValue(node, out bool v)) { _expanded[node] = true; return true; }
+            return v;
         }
 
-        void EnsureTaskDefinitionDatabase()
+        void SetExpanded(CompositeTaskNode node, bool value) => _expanded[node] = value;
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  COORDINATE HELPERS
+        // ══════════════════════════════════════════════════════════════════
+
+        #region Coordinates
+
+        Vector2 ScreenToScrollLocal(Vector2 mousePos)
         {
-            if (_taskDefinitionDatabase != null) return;
-
-            string[] guids = AssetDatabase.FindAssets("t:TaskDefinitionDatabase");
-            if (guids == null || guids.Length == 0) return;
-
-            string path = AssetDatabase.GUIDToAssetPath(guids[0]);
-            _taskDefinitionDatabase = AssetDatabase.LoadAssetAtPath<TaskDefinitionDatabase>(path);
+            return new Vector2(
+                mousePos.x - _hierarchyScrollRect.x,
+                mousePos.y - _hierarchyScrollRect.y + _hierarchyScroll.y
+            );
         }
 
-        // ── Divider ───────────────────────────────────────────────────────
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  SEARCH FILTER
+        // ══════════════════════════════════════════════════════════════════
+
+        #region Search
+
+        bool IsVisibleBySearch(ATaskNode node)
+        {
+            if (string.IsNullOrEmpty(_searchFilter)) return true;
+            return DoesSubtreeMatch(node, _searchFilter);
+        }
+
+        static bool DoesSubtreeMatch(ATaskNode node, string filter)
+        {
+            if (node == null) return false;
+            if (!string.IsNullOrEmpty(node.name) &&
+                node.name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+            if (node is CompositeTaskNode comp && comp.children != null)
+                foreach (var ch in comp.children)
+                    if (ch?.taskNode != null && DoesSubtreeMatch(ch.taskNode, filter))
+                        return true;
+            return false;
+        }
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  ENABLED CACHE
+        // ══════════════════════════════════════════════════════════════════
+
+        #region EnabledCache
+
+        bool IsNodeHierarchyEnabled(ATaskNode node)
+        {
+            return node != null && _enabledCache.TryGetValue(node, out bool v) ? v : true;
+        }
+
+        void RebuildEnabledCache()
+        {
+            _enabledCache.Clear();
+            if (_taskTree?.Root == null) return;
+            CacheEnabledRec(_taskTree.Root, null, -1, true);
+        }
+
+        void CacheEnabledRec(ATaskNode node, CompositeTaskNode parent, int index, bool parentEnabled)
+        {
+            bool selfEnabled = parentEnabled;
+            if (parent?.children != null && index >= 0 && index < parent.children.Count)
+                selfEnabled = parentEnabled && parent.children[index].enabled;
+
+            _enabledCache[node] = selfEnabled;
+
+            if (node is CompositeTaskNode comp && comp.children != null)
+                for (int i = 0; i < comp.children.Count; i++)
+                    if (comp.children[i]?.taskNode != null)
+                        CacheEnabledRec(comp.children[i].taskNode, comp, i, selfEnabled);
+        }
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  EXPANDED DICT CLEANUP
+        // ══════════════════════════════════════════════════════════════════
+
+        #region ExpandedCleanup
+
+        void PurgeExpandedDict()
+        {
+            if (_taskTree?.Root == null) { _expanded.Clear(); return; }
+            var alive = new HashSet<ATaskNode>();
+            CollectAllNodes(_taskTree.Root, alive);
+            var toRemove = new List<ATaskNode>();
+            foreach (var key in _expanded.Keys)
+                if (!alive.Contains(key)) toRemove.Add(key);
+            foreach (var key in toRemove)
+                _expanded.Remove(key);
+        }
+
+        static void CollectAllNodes(ATaskNode node, HashSet<ATaskNode> set)
+        {
+            if (node == null) return;
+            set.Add(node);
+            if (node is CompositeTaskNode comp && comp.children != null)
+                foreach (var ch in comp.children)
+                    if (ch?.taskNode != null)
+                        CollectAllNodes(ch.taskNode, set);
+        }
+
+        #endregion
+
+        // ══════════════════════════════════════════════════════════════════
+        //  DIVIDER
+        // ══════════════════════════════════════════════════════════════════
+
+        #region Divider
+
         void DrawDivider(Rect rect)
         {
-            EditorGUI.DrawRect(rect, new Color(0.1f, 0.1f, 0.1f));
+            EditorGUI.DrawRect(rect, DividerColor);
             EditorGUIUtility.AddCursorRect(rect, MouseCursor.ResizeHorizontal);
         }
 
@@ -984,343 +1852,40 @@ namespace Hlight.Structures.CompositeTask.Editor
             if (_resizingDivider)
             {
                 if (e.type == EventType.MouseDrag)
-                { _hierarchyWidth = Mathf.Clamp(e.mousePosition.x, 150, position.width - 200); Repaint(); e.Use(); }
+                {
+                    _hierarchyWidth = Mathf.Clamp(e.mousePosition.x, MinHierarchyWidth,
+                        position.width - MinInspectorWidth);
+                    Repaint();
+                    e.Use();
+                }
                 if (e.type == EventType.MouseUp)
                 { _resizingDivider = false; e.Use(); }
             }
         }
 
-        // ══════════════════════════════════════════════════════════════════
-        //  INSPECTOR
-        // ══════════════════════════════════════════════════════════════════
-        void DrawInspector(Rect rect)
-        {
-            EditorGUI.DrawRect(rect, new Color(0.22f, 0.22f, 0.22f));
-
-            // Header
-            var headerRect = new Rect(rect.x, rect.y, rect.width, 22);
-            EditorGUI.DrawRect(headerRect, new Color(0.15f, 0.15f, 0.15f));
-            GUI.Label(headerRect, "  Inspector", _headerStyle);
-
-            if (_selected == null)
-            {
-                GUI.Label(new Rect(rect.x + 10, rect.y + 30, rect.width - 20, 20),
-                    "Nothing selected.", _dimLabelStyle);
-                return;
-            }
-
-            var bodyRect = new Rect(rect.x, rect.y + 22, rect.width, rect.height - 22);
-            GUILayout.BeginArea(bodyRect);
-            _inspectorScroll = GUILayout.BeginScrollView(_inspectorScroll);
-
-            DrawInspectorContent(_selected);
-
-            GUILayout.EndScrollView();
-            GUILayout.EndArea();
-        }
-
-        void DrawInspectorContent(ATaskNode node)
-        {
-            // Không cần header "Node" nữa – chỉ hiển thị nội dung cụ thể theo loại node
-            if (node is MonoTaskNode mono)
-                DrawMonoInspector(mono);
-            else if (node is CompositeTaskNode comp)
-                DrawCompositeInspector(comp);
-
-            // ── Runtime ──
-            if (Application.isPlaying)
-            {
-                GUILayout.Space(8);
-                SeparatorLine();
-                GUILayout.Space(6);
-                SectionHeader("Runtime");
-                GUILayout.Space(4);
-                DrawRuntimeInspector(node);
-            }
-
-            GUILayout.Space(16);
-        }
-
-        // ── MonoTaskNode inspector ────────────────────────────────────────
-        void DrawMonoInspector(MonoTaskNode mono)
-        {
-            // taskDefinition type picker — dùng trực tiếp _taskDefinitionDatabase
-            var types = GetTaskDefinitionTypes(out var names);
-
-            int curIdx = IndexOfType(types, mono.taskDefinition?.GetType());
-
-            EditorGUILayout.LabelField("Task Definition:", EditorStyles.boldLabel);
-
-            if (types.Length == 0)
-            {
-                EditorGUILayout.HelpBox("No ITaskDefinition implementations found in current TaskDefinitionDatabase.", MessageType.Info);
-                return;
-            }
-
-            // Thêm option "None" cho phép taskDefinition = null
-            var options = new string[names.Length + 1];
-            options[0] = "None";
-            Array.Copy(names, 0, options, 1, names.Length);
-
-            int popupIndex = mono.taskDefinition == null ? 0 : (curIdx >= 0 ? curIdx + 1 : 0);
-
-            int newPopupIndex = EditorGUILayout.Popup("Type", popupIndex, options);
-            if (newPopupIndex != popupIndex)
-            {
-                Undo.RegisterCompleteObjectUndo(_taskTree, "Change taskDefinition");
-
-                if (newPopupIndex == 0)
-                {
-                    mono.taskDefinition = null;
-                }
-                else
-                {
-                    int typeIndex = newPopupIndex - 1;
-                    if (typeIndex >= 0 && typeIndex < types.Length)
-                    {
-                        mono.taskDefinition = (ITaskDefinition)Activator.CreateInstance(types[typeIndex]);
-                    }
-                }
-                SetDirty();
-            }
-
-            if (mono.taskDefinition != null)
-            {
-                GUILayout.Space(6);
-                EditorGUI.indentLevel++;
-                DrawObjectFields(mono.taskDefinition);
-                EditorGUI.indentLevel--;
-            }
-        }
-
-        Type[] GetTaskDefinitionTypes(out string[] displayNames)
-        {
-            displayNames = Array.Empty<string>();
-
-            if (_taskDefinitionDatabase == null || _taskDefinitionDatabase.entries == null)
-                return Array.Empty<Type>();
-
-            var typeList = new List<Type>();
-            var nameList = new List<string>();
-
-            foreach (var entry in _taskDefinitionDatabase.entries)
-            {
-                if (entry == null || entry.script == null) continue;
-                var type = entry.script.GetClass();
-                if (type == null) continue;
-                if (type.IsAbstract || type.IsInterface) continue;
-                if (!typeof(ITaskDefinition).IsAssignableFrom(type)) continue;
-
-                typeList.Add(type);
-                nameList.Add(string.IsNullOrEmpty(entry.displayName) ? type.Name : entry.displayName);
-            }
-
-            displayNames = nameList.ToArray();
-            return typeList.ToArray();
-        }
-
-        static int IndexOfType(Type[] types, Type t)
-        {
-            if (types == null || t == null) return -1;
-            for (int i = 0; i < types.Length; i++)
-            {
-                if (types[i] == t) return i;
-            }
-            return -1;
-        }
-
-        // ── CompositeTaskNode inspector ───────────────────────────────────
-        void DrawCompositeInspector(CompositeTaskNode comp)
-        {
-            // executionMode
-            EditorGUI.BeginChangeCheck();
-            var newMode = (ExecutionMode)EditorGUILayout.EnumPopup("Execution Mode", comp.executionMode);
-            if (EditorGUI.EndChangeCheck())
-            {
-                Undo.RegisterCompleteObjectUndo(_taskTree, "Change executionMode");
-                comp.executionMode = newMode;
-                SetDirty();
-            }
-
-            GUILayout.Space(8);
-            EditorGUILayout.LabelField($"Children ({comp.children?.Count ?? 0})", EditorStyles.boldLabel);
-
-            // Children list: toggle (enabled) + name field + weight + delete
-            if (comp.children != null)
-            {
-                for (int i = 0; i < comp.children.Count; i++)
-                {
-                    var child = comp.children[i];
-                    if (child?.taskNode == null) continue;
-
-                    int ci = i; // capture for lambda
-                    GUILayout.BeginHorizontal();
-
-                    // Enabled toggle
-                    EditorGUI.BeginChangeCheck();
-                    bool newEnabled = GUILayout.Toggle(child.enabled, GUIContent.none, GUILayout.Width(18));
-                    if (EditorGUI.EndChangeCheck())
-                    {
-                        Undo.RegisterCompleteObjectUndo(_taskTree, "Toggle Child Enabled");
-                        comp.children[ci].enabled = newEnabled;
-                        SetDirty();
-                    }
-
-                    // Name field giống GameObject: chỉnh trực tiếp name của child node
-                    EditorGUI.BeginChangeCheck();
-                    string childName = EditorGUILayout.TextField(child.taskNode.name ?? string.Empty);
-                    if (EditorGUI.EndChangeCheck())
-                    {
-                        Undo.RegisterCompleteObjectUndo(_taskTree, "Rename Child Node");
-                        child.taskNode.name = childName;
-                        SetDirty();
-                    }
-
-                    // subTaskValue inline
-                    EditorGUI.BeginChangeCheck();
-                    float newSv = EditorGUILayout.FloatField(child.subTaskValue, GUILayout.Width(48));
-                    if (EditorGUI.EndChangeCheck())
-                    {
-                        Undo.RegisterCompleteObjectUndo(_taskTree, "Edit subTaskValue");
-                        comp.children[ci].subTaskValue = Mathf.Max(0f, newSv);
-                        SetDirty();
-                    }
-
-                    // Delete child button
-                    var oldColor = GUI.color;
-                    GUI.color = new Color(1f, 0.4f, 0.4f);
-                    if (GUILayout.Button("✕", GUILayout.Width(22), GUILayout.Height(18)))
-                    {
-                        Undo.RegisterCompleteObjectUndo(_taskTree, "Remove Child");
-                        if (_selected == comp.children[ci].taskNode) _selected = comp;
-                        comp.children.RemoveAt(ci);
-                        SetDirty();
-                        GUILayout.EndHorizontal();
-                        GUI.color = oldColor;
-                        break; // list changed, stop iteration
-                    }
-                    GUI.color = oldColor;
-                    GUILayout.EndHorizontal();
-                }
-            }
-
-            GUILayout.Space(6);
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("+ Mono Task"))   AddMonoChild(comp);
-            if (GUILayout.Button("+ Composite Task"))   AddCompositeChild(comp, ExecutionMode.Sequential);
-            GUILayout.EndHorizontal();
-        }
-
-        // ── Runtime inspector ─────────────────────────────────────────────
-        void DrawRuntimeInspector(ATaskNode node)
-        {
-            // Status
-            Color statusColor = node.Status switch
-            {
-                TaskNodeStatus.Running   => new Color(0.2f, 0.8f, 1f),
-                TaskNodeStatus.Completed => new Color(0.2f, 0.9f, 0.3f),
-                _                        => new Color(0.6f, 0.6f, 0.6f),
-            };
-            var oldColor = GUI.contentColor;
-            GUI.contentColor = statusColor;
-            EditorGUILayout.LabelField("Status", node.Status.ToString(), EditorStyles.boldLabel);
-            GUI.contentColor = oldColor;
-
-            // Progress bar
-            EditorGUILayout.LabelField("Progress", $"{node.Progress * 100f:F1} %");
-            var progressRect = EditorGUILayout.GetControlRect(false, 16);
-            progressRect = EditorGUI.IndentedRect(progressRect);
-            EditorGUI.DrawRect(progressRect, new Color(0.15f, 0.15f, 0.15f));
-            if (node.Progress > 0)
-                EditorGUI.DrawRect(
-                    new Rect(progressRect.x, progressRect.y,
-                             progressRect.width * node.Progress, progressRect.height),
-                    new Color(0.2f, 0.7f, 1f));
-
-            GUILayout.Space(8);
-
-            // Lifecycle buttons
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Force Complete"))          node.ForceComplete();
-            if (GUILayout.Button("Force Complete Immediate")) node.ForceCompleteImmediate();
-            if (GUILayout.Button("Reset"))                   node.Reset();
-            GUILayout.EndHorizontal();
-        }
-
-        // ── Reflection field drawing ──────────────────────────────────────
-        void DrawObjectFields(object obj)
-        {
-            if (obj == null) return;
-            bool changed = false;
-            foreach (var field in obj.GetType().GetFields(
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-            {
-                if (!field.IsPublic && field.GetCustomAttribute<SerializeField>() == null) continue;
-                if (field.GetCustomAttribute<NonSerializedAttribute>() != null) continue;
-
-                string niceName = ObjectNames.NicifyVariableName(field.Name);
-                object val      = field.GetValue(obj);
-
-                EditorGUI.BeginChangeCheck();
-                object newVal   = DrawField(niceName, field.FieldType, val);
-                if (EditorGUI.EndChangeCheck())
-                {
-                    if (!changed)
-                    {
-                        Undo.RegisterCompleteObjectUndo(_taskTree, "Edit Field");
-                        changed = true;
-                    }
-                    field.SetValue(obj, newVal);
-                    SetDirty();
-                }
-            }
-        }
-
-        static object DrawField(string label, Type t, object val)
-        {
-            if (t == typeof(int))    return EditorGUILayout.IntField(label,   val is int   i  ? i  : 0);
-            if (t == typeof(float))  return EditorGUILayout.FloatField(label, val is float f  ? f  : 0f);
-            if (t == typeof(string)) return EditorGUILayout.TextField(label,  val as string ?? "");
-            if (t == typeof(bool))   return EditorGUILayout.Toggle(label,     val is bool  b  && b);
-            if (t == typeof(Vector2)) return EditorGUILayout.Vector2Field(label, val is Vector2 v2 ? v2 : default);
-            if (t == typeof(Vector3)) return EditorGUILayout.Vector3Field(label, val is Vector3 v3 ? v3 : default);
-            if (t.IsEnum)            return EditorGUILayout.EnumPopup(label,  val is Enum e ? e : (Enum)Enum.GetValues(t).GetValue(0));
-            if (typeof(UnityEngine.Object).IsAssignableFrom(t))
-                return EditorGUILayout.ObjectField(label, val as UnityEngine.Object, t, allowSceneObjects: true);
-
-            EditorGUILayout.LabelField(label, $"({t.Name}) — unsupported", EditorStyles.miniLabel);
-            return val;
-        }
-
-        // ── Inspector helpers ─────────────────────────────────────────────
-        void SectionHeader(string title)
-        {
-            GUILayout.Label(title, _sectionStyle);
-        }
-
-        void SeparatorLine()
-        {
-            var rect = EditorGUILayout.GetControlRect(false, 1);
-            EditorGUI.DrawRect(rect, new Color(0.13f, 0.13f, 0.13f));
-        }
+        #endregion
 
         // ══════════════════════════════════════════════════════════════════
-        //  STYLES  (built once, lazily)
+        //  STYLES
         // ══════════════════════════════════════════════════════════════════
+
+        #region Styles
+
         void BuildStyles()
         {
-            if (_stylesBuilt) return;
+            // Rebuild nếu chưa build hoặc sau domain reload (styles bị null)
+            if (_stylesBuilt && _labelStyle != null) return;
             _stylesBuilt = true;
 
             _labelStyle = new GUIStyle(EditorStyles.label)
             {
-                normal   = { textColor = new Color(0.85f, 0.85f, 0.85f) },
+                normal    = { textColor = new Color(0.85f, 0.85f, 0.85f) },
                 alignment = TextAnchor.MiddleLeft,
             };
 
             _dimLabelStyle = new GUIStyle(EditorStyles.label)
             {
-                normal = { textColor = new Color(0.5f, 0.5f, 0.5f) },
+                normal   = { textColor = DisabledTextColor },
                 fontSize = 10,
             };
 
@@ -1334,201 +1899,62 @@ namespace Hlight.Structures.CompositeTask.Editor
 
             _sectionStyle = new GUIStyle(EditorStyles.boldLabel)
             {
-                fontSize  = 11,
-                normal    = { textColor = new Color(0.75f, 0.75f, 0.75f) },
+                fontSize = 11,
+                normal   = { textColor = new Color(0.75f, 0.75f, 0.75f) },
             };
 
             _renameStyle = new GUIStyle(EditorStyles.textField)
             {
                 padding  = new RectOffset(2, 2, 1, 1),
-                fontSize  = EditorStyles.label.fontSize,
+                fontSize = EditorStyles.label.fontSize,
             };
+
+            _foldoutArrowStyle = new GUIStyle(EditorStyles.label)
+            {
+                normal = { textColor = FoldoutArrowColor }
+            };
+
+            _statusDotStyle = new GUIStyle(EditorStyles.label)
+            {
+                fontSize = 9,
+            };
+
+            _nodeNameStyle = new GUIStyle(_labelStyle);
         }
+
+        #endregion
 
         // ══════════════════════════════════════════════════════════════════
-        //  KEYBOARD SHORTCUTS (handled in OnGUI before drawing)
+        //  UTILITY
         // ══════════════════════════════════════════════════════════════════
-        void HandleKeyboard()
+
+        #region Utility
+
+        void SetDirty()
         {
-            if (_taskTree == null || _taskTree.Root == null) return;
-            var e = Event.current;
-            if (e.type != EventType.KeyDown) return;
-
-            // Nếu đang gõ trong một text field bất kỳ (thường là ở Inspector),
-            // thì không xử lý phím tắt của Hierarchy, trừ khi đó là ô rename của Hierarchy.
-            if (EditorGUIUtility.editingTextField)
-            {
-                var focused = GUI.GetNameOfFocusedControl();
-                if (focused != "RenameField")
-                    return;
-            }
-
-            bool ctrl = e.control || e.command;
-
-            // Nếu chưa có selection, mặc định chọn Root
-            if (_selected == null)
-            {
-                _selected = _taskTree.Root;
-                Repaint();
-            }
-
-            // Đang rename: Enter / Escape đã được xử lý trong OnGUI.
-            // Các phím điều hướng khác trước tiên sẽ commit rename.
-            if (_renamingNode != null &&
-                (e.keyCode == KeyCode.UpArrow || e.keyCode == KeyCode.DownArrow ||
-                 e.keyCode == KeyCode.LeftArrow || e.keyCode == KeyCode.RightArrow))
-            {
-                CommitRename();
-            }
-
-            // Danh sách node đang hiển thị theo thứ tự vẽ trong Hierarchy
-            var visible = new List<ATaskNode>();
-            BuildVisibleList(_taskTree.Root, visible);
-            int curIndex = visible.IndexOf(_selected);
-
-            // Delete
-            if (e.keyCode == KeyCode.Delete || e.keyCode == KeyCode.Backspace)
-            {
-                DeleteNode(_selected);
-                e.Use();
-                return;
-            }
-
-            // Duplicate
-            if (ctrl && e.keyCode == KeyCode.D)
-            {
-                DuplicateNode(_selected);
-                e.Use();
-                return;
-            }
-
-            // Copy / Paste
-            if (ctrl && e.keyCode == KeyCode.C)
-            { _clipboard = _selected; e.Use(); return; }
-
-            if (ctrl && e.keyCode == KeyCode.V && _selected is CompositeTaskNode cv)
-            { PasteChild(cv); e.Use(); return; }
-
-            // Rename shortcut — mô phỏng Hierarchy: Windows dùng F2, macOS dùng Enter.
-            if (_renamingNode == null && IsRenameKey(e))
-            {
-                StartRename(_selected);
-                e.Use();
-                return;
-            }
-
-            // Điều hướng lên/xuống giống Hierarchy
-            if (curIndex >= 0)
-            {
-                if (e.keyCode == KeyCode.UpArrow)
-                {
-                    if (curIndex > 0)
-                    {
-                        _selected = visible[curIndex - 1];
-                        Repaint();
-                    }
-                    e.Use();
-                    return;
-                }
-
-                if (e.keyCode == KeyCode.DownArrow)
-                {
-                    if (curIndex < visible.Count - 1)
-                    {
-                        _selected = visible[curIndex + 1];
-                        Repaint();
-                    }
-                    e.Use();
-                    return;
-                }
-            }
-
-            // Left / Right: thu gọn / mở rộng giống Hierarchy
-            if (e.keyCode == KeyCode.LeftArrow)
-            {
-                if (_selected is CompositeTaskNode comp)
-                {
-                    if (IsExpanded(comp))
-                    {
-                        // Nếu đang mở → gập lại
-                        SetExpanded(comp, false);
-                        Repaint();
-                    }
-                    else
-                    {
-                        // Đang gập → move selection lên parent
-                        FindParent(_taskTree.Root, _selected, out var parent, out _);
-                        if (parent != null)
-                        {
-                            _selected = parent;
-                            Repaint();
-                        }
-                    }
-                }
-                else
-                {
-                    // Node lá → chuyển selection lên parent
-                    FindParent(_taskTree.Root, _selected, out var parent, out _);
-                    if (parent != null)
-                    {
-                        _selected = parent;
-                        Repaint();
-                    }
-                }
-                e.Use();
-                return;
-            }
-
-            if (e.keyCode == KeyCode.RightArrow)
-            {
-                if (_selected is CompositeTaskNode comp)
-                {
-                    if (!IsExpanded(comp))
-                    {
-                        // Đang gập → mở ra
-                        SetExpanded(comp, true);
-                        Repaint();
-                    }
-                    else if (comp.children != null && comp.children.Count > 0)
-                    {
-                        // Đã mở → nhảy xuống child đầu tiên
-                        var firstChild = comp.children[0].taskNode;
-                        if (firstChild != null)
-                        {
-                            _selected = firstChild;
-                            Repaint();
-                        }
-                    }
-                }
-                e.Use();
-            }
+            if (_taskTree == null) return;
+            EditorUtility.SetDirty(_taskTree);
+            UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(_taskTree.gameObject.scene);
+            Repaint();
         }
 
-        void BuildVisibleList(ATaskNode node, List<ATaskNode> list)
+        void EnsureTaskDefinitionDatabase()
         {
-            if (node == null) return;
-            list.Add(node);
-
-            if (node is CompositeTaskNode comp && IsExpanded(comp) && comp.children != null)
-            {
-                foreach (var ch in comp.children)
-                {
-                    if (ch?.taskNode != null)
-                        BuildVisibleList(ch.taskNode, list);
-                }
-            }
+            if (_taskDefinitionDatabase != null) return;
+            string[] guids = AssetDatabase.FindAssets("t:TaskDefinitionDatabase");
+            if (guids == null || guids.Length == 0) return;
+            string path = AssetDatabase.GUIDToAssetPath(guids[0]);
+            _taskDefinitionDatabase = AssetDatabase.LoadAssetAtPath<TaskDefinitionDatabase>(path);
         }
 
-        bool IsRenameKey(Event e)
+        void SectionHeader(string title) => GUILayout.Label(title, _sectionStyle);
+
+        void SeparatorLine()
         {
-            // Cho phép cả F2 và Enter/Return (không modifier) để bắt đầu rename,
-            // nhằm mô phỏng Hierarchy trên cả Windows và macOS một cách ổn định.
-            if (e.keyCode == KeyCode.F2) return true;
-            if ((e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter) &&
-                !e.alt && !e.control && !e.command)
-                return true;
-            return false;
+            var rect = EditorGUILayout.GetControlRect(false, 1);
+            EditorGUI.DrawRect(rect, SeparatorColor);
         }
+
+        #endregion
     }
-
 }

@@ -1,6 +1,9 @@
+using System;
+using System.Collections.Generic;
 using System.IO;
 using Hlight.Structures.CompositeTask.Runtime;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Serialization;
 using UnityEditor;
 using UnityEngine;
 
@@ -16,11 +19,27 @@ namespace Hlight.Structures.CompositeTask.Editor
     {
         TextAsset _importJson;
         DefaultAsset _exportFolder;
+        TaskDefinitionDatabase _taskDefinitionDatabase;
 
-        static readonly JsonSerializerSettings JsonSettings = new JsonSerializerSettings
+        JsonSerializerSettings GetJsonSettings()
         {
-            TypeNameHandling = TypeNameHandling.Auto,
-        };
+            if (_taskDefinitionDatabase == null)
+            {
+                string[] guids = AssetDatabase.FindAssets("t:TaskDefinitionDatabase");
+                if (guids != null && guids.Length > 0)
+                {
+                    string path = AssetDatabase.GUIDToAssetPath(guids[0]);
+                    _taskDefinitionDatabase = AssetDatabase.LoadAssetAtPath<TaskDefinitionDatabase>(path);
+                }
+            }
+
+            return new JsonSerializerSettings
+            {
+                TypeNameHandling = TypeNameHandling.Auto,
+                SerializationBinder = new TaskTreeSerializationBinder(_taskDefinitionDatabase),
+                Formatting = Formatting.Indented,
+            };
+        }
 
         public override void OnInspectorGUI()
         {
@@ -106,7 +125,7 @@ namespace Hlight.Structures.CompositeTask.Editor
             var fileName = $"{tree.gameObject.name}_TaskTree.json";
             var fullPath = Path.Combine(fullFolder, fileName);
 
-            var json = JsonConvert.SerializeObject(tree.Root, JsonSettings);
+            var json = JsonConvert.SerializeObject(tree.Root, GetJsonSettings());
             File.WriteAllText(fullPath, json);
             Debug.Log($"TaskTree exported to: {fullPath}");
             AssetDatabase.Refresh();
@@ -136,7 +155,7 @@ namespace Hlight.Structures.CompositeTask.Editor
             CompositeTaskNode newRoot;
             try
             {
-                newRoot = JsonConvert.DeserializeObject<CompositeTaskNode>(json, JsonSettings);
+                newRoot = JsonConvert.DeserializeObject<CompositeTaskNode>(json, GetJsonSettings());
             }
             catch (JsonException e)
             {
@@ -161,6 +180,46 @@ namespace Hlight.Structures.CompositeTask.Editor
             tree.Root = newRoot;
             EditorUtility.SetDirty(tree);
             UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(tree.gameObject.scene);
+        }
+    }
+
+    public class TaskTreeSerializationBinder : ISerializationBinder
+    {
+        private readonly HashSet<string> _allowedTypes;
+
+        public TaskTreeSerializationBinder(TaskDefinitionDatabase database)
+        {
+            _allowedTypes = new HashSet<string>
+            {
+                typeof(CompositeTaskNode).FullName,
+                typeof(MonoTaskNode).FullName,
+                typeof(CompositeTaskNode.Child).FullName,
+            };
+
+            if (database?.entries != null)
+            {
+                foreach (var entry in database.entries)
+                {
+                    var type = entry?.script?.GetClass();
+                    if (type != null)
+                        _allowedTypes.Add(type.FullName);
+                }
+            }
+        }
+
+        public Type BindToType(string assemblyName, string typeName)
+        {
+            if (!_allowedTypes.Contains(typeName))
+                throw new JsonSerializationException(
+                    $"Type '{typeName}' is not allowed for deserialization.");
+
+            return Type.GetType($"{typeName}, {assemblyName}");
+        }
+
+        public void BindToName(Type serializedType, out string assemblyName, out string typeName)
+        {
+            assemblyName = serializedType.Assembly.FullName;
+            typeName = serializedType.FullName;
         }
     }
 }
