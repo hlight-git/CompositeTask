@@ -37,19 +37,17 @@ namespace Hlight.Structures.CompositeTask.Runtime
         {
             if (Status == TaskNodeStatus.Completed) return;
             Status = TaskNodeStatus.Running;
+            
             taskBeginCancellationTokenSource = new CancellationTokenSource();
             taskEndCancellationTokenSource = new CancellationTokenSource();
-            var registration = externalCancellationToken.Register(() =>
-            {
-                taskBeginCancellationTokenSource.Cancel();
-                taskEndCancellationTokenSource.Cancel();
-            });
+            
+            var registration = externalCancellationToken.Register(CancelAllCancellationTokenSources);
 
             try
             {
                 await OnTaskBegin(taskBeginCancellationTokenSource.Token);
                 await OnTaskEnd(taskEndCancellationTokenSource.Token);
-                ForceCompleteImmediate();
+                OnCompleted();
             }
             finally
             {
@@ -71,7 +69,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
             switch (Status)
             {
                 case TaskNodeStatus.Pending:
-                    ForceCompleteImmediate();
+                    OnCompleted();
                     return;
                 case TaskNodeStatus.Running:
                     taskBeginCancellationTokenSource?.Cancel();
@@ -79,24 +77,34 @@ namespace Hlight.Structures.CompositeTask.Runtime
             }
         }
 
-        public virtual void ForceCompleteImmediate()
+        protected virtual void CancelAllCancellationTokenSources()
         {
-            if (Status == TaskNodeStatus.Completed) return;
-            taskBeginCancellationTokenSource?.Cancel();
-            taskEndCancellationTokenSource?.Cancel();
+            taskBeginCancellationTokenSource.Cancel();
+            taskEndCancellationTokenSource.Cancel();
+        }
+
+        protected virtual void OnCompleted()
+        {
             Progress = 1;
             Status = TaskNodeStatus.Completed;
             Completed?.Invoke(this);
         }
 
+        public virtual void ForceCompleteImmediate()
+        {
+            if (Status == TaskNodeStatus.Completed) return;
+            taskBeginCancellationTokenSource?.Cancel();
+            taskEndCancellationTokenSource?.Cancel();
+            OnCompleted();
+        }
+
         public virtual void Dispose()
         {
+            Reset();
             taskBeginCancellationTokenSource?.Dispose();
             taskEndCancellationTokenSource?.Dispose();
             taskBeginCancellationTokenSource = null;
             taskEndCancellationTokenSource = null;
-            ProgressChanged = null;
-            Completed = null;
         }
 
         public abstract void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor);

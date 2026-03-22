@@ -10,7 +10,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         public override void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor)
         {
-            taskDefinition.Accept(dependencyInjectionVisitor);
+            (taskDefinition as IDependencyInjectionVisitable)?.Accept(dependencyInjectionVisitor);
         }
 
         protected override UniTask OnTaskBegin(CancellationToken cancellationToken)
@@ -24,11 +24,16 @@ namespace Hlight.Structures.CompositeTask.Runtime
             return taskDefinition.OnEnd(this, cancellationToken);
         }
 
-        public override void ForceCompleteImmediate()
+        protected override void OnCompleted()
         {
-            if (Status == TaskNodeStatus.Completed) return;
             taskDefinition?.OnCompleted(this);
-            base.ForceCompleteImmediate();
+            base.OnCompleted();
+        }
+
+        protected override void CancelAllCancellationTokenSources()
+        {
+            base.CancelAllCancellationTokenSources();
+            taskDefinition.OnCanceledWhenRunning(this);
         }
     }
 }
