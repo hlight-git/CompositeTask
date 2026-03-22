@@ -1,9 +1,6 @@
-using System;
-using System.Collections.Generic;
 using System.IO;
 using Hlight.Structures.CompositeTask.Runtime;
 using Newtonsoft.Json;
-using Newtonsoft.Json.Serialization;
 using UnityEditor;
 using UnityEngine;
 
@@ -180,46 +177,6 @@ namespace Hlight.Structures.CompositeTask.Editor
             tree.Root = newRoot;
             EditorUtility.SetDirty(tree);
             UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(tree.gameObject.scene);
-        }
-    }
-
-    public class TaskTreeSerializationBinder : ISerializationBinder
-    {
-        private readonly HashSet<string> _allowedTypes;
-
-        public TaskTreeSerializationBinder(TaskDefinitionDatabase database)
-        {
-            _allowedTypes = new HashSet<string>
-            {
-                typeof(CompositeTaskNode).FullName,
-                typeof(MonoTaskNode).FullName,
-                typeof(CompositeTaskNode.Child).FullName,
-            };
-
-            if (database?.entries != null)
-            {
-                foreach (var entry in database.entries)
-                {
-                    var type = entry?.script?.GetClass();
-                    if (type != null)
-                        _allowedTypes.Add(type.FullName);
-                }
-            }
-        }
-
-        public Type BindToType(string assemblyName, string typeName)
-        {
-            if (!_allowedTypes.Contains(typeName))
-                throw new JsonSerializationException(
-                    $"Type '{typeName}' is not allowed for deserialization.");
-
-            return Type.GetType($"{typeName}, {assemblyName}");
-        }
-
-        public void BindToName(Type serializedType, out string assemblyName, out string typeName)
-        {
-            assemblyName = serializedType.Assembly.FullName;
-            typeName = serializedType.FullName;
         }
     }
 }

@@ -22,16 +22,18 @@ namespace Hlight.Structures.CompositeTask.Editor
             /// </summary>
             public string displayName;
 
-            /// <summary>
-            /// Mô tả ngắn về task definition (hiển thị trong inspector/tool).
-            /// </summary>
-            [TextArea]
-            public string description;
+            public bool useFullNameWhenSerializationBinding;
 
             /// <summary>
             /// MonoScript trỏ tới class implement ITaskDefinition.
             /// </summary>
             public MonoScript script;
+
+            /// <summary>
+            /// Mô tả ngắn về task definition (hiển thị trong inspector/tool).
+            /// </summary>
+            [TextArea]
+            public string description;
         }
 
         public List<Entry> entries = new List<Entry>();
