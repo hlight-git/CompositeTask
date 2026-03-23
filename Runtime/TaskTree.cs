@@ -1,22 +1,29 @@
+using System;
+using System.Collections.Generic;
 using System.Threading;
 using Cysharp.Threading.Tasks;
-using UnityEngine;
 
 namespace Hlight.Structures.CompositeTask.Runtime
 {
-    public class TaskTree : MonoBehaviour
+    [Serializable]
+    public class TaskTree
     {
-        [field: SerializeField] public CompositeTaskNode Root { get; set; }
+        public CompositeTaskNode root = new()
+        {
+            name = "Root",
+            executionMode = ExecutionMode.Sequential,
+            children = new List<CompositeTaskNode.Child>(),
+        };
 
         public void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor)
         {
-            dependencyInjectionVisitor.Visit(Root);
+            dependencyInjectionVisitor.Visit(root);
         }
 
         public CancellationTokenSource Execute()
         {
             var cancellationTokenSource = new CancellationTokenSource();
-            Root.ExecuteAsync(cancellationTokenSource.Token).Forget();
+            root.ExecuteAsync(cancellationTokenSource.Token).Forget();
             return cancellationTokenSource;
         }
     }
