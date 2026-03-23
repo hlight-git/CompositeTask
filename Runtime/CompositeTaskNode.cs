@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
@@ -18,10 +17,18 @@ namespace Hlight.Structures.CompositeTask.Runtime
             public float subTaskValue;
             [SerializeReference] public ATaskNode taskNode;
         }
-        
+        [Newtonsoft.Json.JsonConverter(typeof(Newtonsoft.Json.Converters.StringEnumConverter))]
         [SerializeField] public ExecutionMode executionMode;
         [SerializeField] public List<Child> children;
-        
+
+        public override void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor)
+        {
+            foreach (var child in children)
+            {
+                child.taskNode.Accept(dependencyInjectionVisitor);
+            }
+        }
+
         protected override async UniTask OnTaskBegin(CancellationToken cancellationToken)
         {
             if (executionMode == ExecutionMode.Sequential)
@@ -65,8 +72,13 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         private void OnChildProgressChanged(ATaskNode childTaskNode, float delta)
         {
+            var sum = GetSubTaskValueSum();
+            if (sum <= 0f) return;
             var child = children.Find(c => c.taskNode == childTaskNode);
-            Progress += delta * child.subTaskValue / GetSubTaskValueSum();
+            Progress += delta * child.subTaskValue / sum;
+
+            if (Progress >= targetProgressToComplete)
+                ForceComplete();
         }
         
         private float GetSubTaskValueSum()
@@ -85,13 +97,15 @@ namespace Hlight.Structures.CompositeTask.Runtime
         public void InsertChild(int index, Child child)
         {
             children.Insert(index, child);
-
             if (Status != TaskNodeStatus.Running) return;
-            
+
             var subTaskValueSum = GetSubTaskValueSum();
-            var oldProgressPoint = Progress * subTaskValueSum;
-            subTaskValueSum += child.subTaskValue;
-            Progress = oldProgressPoint / subTaskValueSum;
+            if (subTaskValueSum > 0)
+            {
+                var oldProgressPoint = Progress * (subTaskValueSum - child.subTaskValue);
+                Progress = oldProgressPoint / subTaskValueSum;
+            }
+
             if (executionMode == ExecutionMode.Parallel)
                 ExecuteChildNode(child.taskNode, taskEndCancellationTokenSource.Token).Forget();
         }
