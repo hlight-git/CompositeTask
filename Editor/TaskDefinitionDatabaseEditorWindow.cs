@@ -1,3 +1,9 @@
+// =============================================================================
+//  TaskDefinitionDatabaseEditor.cs
+//  Custom Inspector cho TaskDefinitionDatabase ScriptableObject.
+//  Vẽ trực tiếp vào Inspector — không cần EditorWindow riêng.
+// =============================================================================
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -7,155 +13,109 @@ using UnityEngine;
 
 namespace Hlight.Structures.CompositeTask.Editor
 {
-    /// <summary>
-    /// Tool đơn giản để:
-    /// - Chọn / tạo TaskDefinitionDatabase.
-    /// - Thêm entry mới từ các ITaskDefinition chưa có trong database.
-    /// - Export JSON (typeName + description).
-    /// 
-    /// Logic theo yêu cầu:
-    /// - Luôn vẽ form.
-    /// - Dropdown có option "None" ở đầu.
-    /// - Mỗi lần vẽ dropdown sẽ quét type ITaskDefinition một lần (chỉ dùng reflection, không quét asset).
-    /// - Khi chọn "None" thì không AddEntry được.
-    /// - Khi AddEntry mới, script được tìm bằng FindAssets/MonoScript đúng lúc bấm nút.
-    /// </summary>
-    public class TaskDefinitionDatabaseEditorWindow : EditorWindow
+    [CustomEditor(typeof(TaskDefinitionDatabase))]
+    public class TaskDefinitionDatabaseEditor : UnityEditor.Editor
     {
-        const string DefaultAssetPath = "Assets/Submodules/CompositeTask/Editor/TaskDefinitionDatabase.asset";
+        // Add entry form state
+        Type[]   _availableTypes   = Array.Empty<Type>();
+        string[] _availableOptions = { "None" };
+        int      _selectedTypeIndex;
+        string   _newDisplayName = "";
+        string   _newDescription = "";
 
-        TaskDefinitionDatabase _database;
-
-        // Cache ứng viên hiện tại cho dropdown
-        Type[]  _availableTypes   = Array.Empty<Type>();   // 0-based, không bao gồm "None"
-        string[] _availableOptions = Array.Empty<string>(); // 0: "None", 1.. = type.FullName
-
-        // Form state
-        int    _selectedTypeIndex = 0; // index trong _availableOptions (0 = None)
-        string _newDisplayName    = "";
-        string _newDescription    = "";
-
-        [MenuItem("Window/Task Tree/Task Definition Database")]
-        public static void Open()
+        public override void OnInspectorGUI()
         {
-            var win = GetWindow<TaskDefinitionDatabaseEditorWindow>("Task Definitions");
-            win.minSize = new Vector2(520, 260);
-            win.Show();
-        }
+            var db = (TaskDefinitionDatabase)target;
+            db.entries ??= new List<TaskDefinitionDatabase.Entry>();
 
-        void OnEnable()
-        {
-            if (_database == null)
+            serializedObject.Update();
+
+            // ── Existing entries ──
+            EditorGUILayout.LabelField("Registered Task Definitions", EditorStyles.boldLabel);
+            EditorGUILayout.Space(2);
+
+            var entriesProp = serializedObject.FindProperty("entries");
+            if (entriesProp != null && entriesProp.arraySize > 0)
             {
-                string[] guids = AssetDatabase.FindAssets("t:TaskDefinitionDatabase");
-                if (guids != null && guids.Length > 0)
+                for (int i = 0; i < entriesProp.arraySize; i++)
                 {
-                    var loadPath = AssetDatabase.GUIDToAssetPath(guids[0]);
-                    _database = AssetDatabase.LoadAssetAtPath<TaskDefinitionDatabase>(loadPath);
+                    var entryProp = entriesProp.GetArrayElementAtIndex(i);
+                    var entry = db.entries[i];
+                    string typeName = entry?.script != null
+                        ? (entry.script.GetClass()?.Name ?? "?")
+                        : "(missing script)";
+                    string label = !string.IsNullOrEmpty(entry?.displayName)
+                        ? $"{entry.displayName} ({typeName})"
+                        : typeName;
+
+                    EditorGUILayout.BeginHorizontal();
+
+                    entryProp.isExpanded = EditorGUILayout.Foldout(entryProp.isExpanded, label, true);
+
+                    // Delete button
+                    var oldColor = GUI.color;
+                    GUI.color = new Color(1f, 0.4f, 0.4f);
+                    if (GUILayout.Button("✕", GUILayout.Width(22), GUILayout.Height(18)))
+                    {
+                        Undo.RecordObject(db, "Remove Entry");
+                        db.entries.RemoveAt(i);
+                        EditorUtility.SetDirty(db);
+                        GUI.color = oldColor;
+                        EditorGUILayout.EndHorizontal();
+                        break;
+                    }
+                    GUI.color = oldColor;
+
+                    EditorGUILayout.EndHorizontal();
+
+                    if (entryProp.isExpanded)
+                    {
+                        EditorGUI.indentLevel++;
+                        EditorGUILayout.PropertyField(entryProp.FindPropertyRelative("displayName"));
+                        EditorGUILayout.PropertyField(entryProp.FindPropertyRelative("script"));
+                        EditorGUILayout.PropertyField(entryProp.FindPropertyRelative("typeSerializationBindingMode"),
+                            new GUIContent("Serialization Binding Mode"));
+                        EditorGUILayout.PropertyField(entryProp.FindPropertyRelative("description"));
+                        EditorGUI.indentLevel--;
+                    }
                 }
             }
-        }
-
-        void OnGUI()
-        {
-            EditorGUILayout.Space();
-            DrawDatabaseHeader();
-
-            if (_database == null)
+            else
             {
-                EditorGUILayout.HelpBox(
-                    "Không tìm thấy TaskDefinitionDatabase.\n" +
-                    "Nhấn \"Create Database...\" để chọn đường dẫn và tạo một asset mới.",
-                    MessageType.Info);
-                if (GUILayout.Button("Create Database...", GUILayout.Height(24)))
-                {
-                    CreateDatabaseWithDialog();
-                }
-                return;
+                EditorGUILayout.HelpBox("No entries. Add ITaskDefinition types below.", MessageType.Info);
             }
 
-            var entries = _database.entries ??= new List<TaskDefinitionDatabase.Entry>();
+            serializedObject.ApplyModifiedProperties();
 
-            EditorGUILayout.Space();
+            // ── Add New Entry ──
+            EditorGUILayout.Space(8);
             EditorGUILayout.LabelField("Add New Entry", EditorStyles.boldLabel);
 
-            DrawAddEntryForm(entries);
+            DrawAddEntryForm(db);
 
-            EditorGUILayout.Space();
+            // ── Export ──
+            EditorGUILayout.Space(8);
             if (GUILayout.Button("Export Task Definitions JSON", GUILayout.Height(22)))
-            {
-                ExportToJson(entries);
-            }
+                ExportToJson(db);
         }
 
-        void DrawDatabaseHeader()
+        void DrawAddEntryForm(TaskDefinitionDatabase db)
         {
-            EditorGUILayout.BeginHorizontal();
-
-            _database = (TaskDefinitionDatabase)EditorGUILayout.ObjectField(
-                "Database Asset", _database, typeof(TaskDefinitionDatabase), false);
-
-            if (GUILayout.Button("Find", GUILayout.Width(60)))
-            {
-                string[] guids = AssetDatabase.FindAssets("t:TaskDefinitionDatabase");
-                if (guids != null && guids.Length > 0)
-                {
-                    var loadPath = AssetDatabase.GUIDToAssetPath(guids[0]);
-                    _database = AssetDatabase.LoadAssetAtPath<TaskDefinitionDatabase>(loadPath);
-                }
-            }
-
-            if (_database != null && GUILayout.Button("Ping", GUILayout.Width(60)))
-            {
-                EditorGUIUtility.PingObject(_database);
-            }
-
-            EditorGUILayout.EndHorizontal();
-        }
-
-        void CreateDatabaseWithDialog()
-        {
-            var path = EditorUtility.SaveFilePanelInProject(
-                "Create Task Definition Database",
-                System.IO.Path.GetFileName(DefaultAssetPath),
-                "asset",
-                "Chọn nơi lưu asset TaskDefinitionDatabase.");
-
-            if (string.IsNullOrEmpty(path)) return;
-
-            var db = ScriptableObject.CreateInstance<TaskDefinitionDatabase>();
-            AssetDatabase.CreateAsset(db, path);
-            AssetDatabase.SaveAssets();
-            AssetDatabase.Refresh();
-            _database = db;
-        }
-
-        void DrawAddEntryForm(List<TaskDefinitionDatabase.Entry> entries)
-        {
-            // 1) Vẽ label
+            // Popup rect — scan types on click
             EditorGUILayout.LabelField("ITaskDefinition Type", EditorStyles.miniBoldLabel);
-
-            // 2) Lấy rect cho popup và tự vẽ bằng EditorGUI.Popup để bắt mouse
-            var popupRect = EditorGUILayout.GetControlRect();
-            popupRect = EditorGUI.IndentedRect(popupRect);
+            var popupRect = EditorGUI.IndentedRect(EditorGUILayout.GetControlRect());
 
             var e = Event.current;
             if (e.type == EventType.MouseDown && popupRect.Contains(e.mousePosition))
             {
-                // Người dùng vừa click mở dropdown → scan type một lần
-                _availableTypes = FindAvailableDefinitionTypes(entries);
-
+                _availableTypes = FindAvailableDefinitionTypes(db.entries);
                 _availableOptions = new string[_availableTypes.Length + 1];
                 _availableOptions[0] = "None";
                 for (int i = 0; i < _availableTypes.Length; i++)
-                {
                     _availableOptions[i + 1] = _availableTypes[i].FullName;
-                }
-
                 _selectedTypeIndex = Mathf.Clamp(_selectedTypeIndex, 0, _availableOptions.Length - 1);
             }
 
-            // Nếu chưa có options (chưa click bao giờ), tạo mảng mặc định với đúng một lựa chọn "None"
             if (_availableOptions == null || _availableOptions.Length == 0)
             {
                 _availableOptions = new[] { "None" };
@@ -166,12 +126,11 @@ namespace Hlight.Structures.CompositeTask.Editor
             if (newIndex != _selectedTypeIndex)
             {
                 _selectedTypeIndex = newIndex;
-                if (_selectedTypeIndex > 0 &&
-                    _availableTypes != null &&
+                if (_selectedTypeIndex > 0 && _availableTypes != null &&
                     _selectedTypeIndex - 1 < _availableTypes.Length)
                 {
                     var t = _availableTypes[_selectedTypeIndex - 1];
-                    _newDisplayName = t != null ? t.Name : _newDisplayName;
+                    if (t != null) _newDisplayName = t.Name;
                 }
             }
 
@@ -195,151 +154,105 @@ namespace Hlight.Structures.CompositeTask.Editor
                     var script = FindMonoScriptForType(type);
                     if (script == null)
                     {
-                        EditorUtility.DisplayDialog(
-                            "Cannot find script",
-                            $"Không tìm thấy MonoScript tương ứng cho type: {type.FullName}",
-                            "OK");
+                        EditorUtility.DisplayDialog("Cannot find script",
+                            $"Không tìm thấy MonoScript cho type: {type.FullName}", "OK");
                         return;
                     }
 
-                    Undo.RecordObject(_database, "Add TaskDefinition Entry");
-                    entries.Add(new TaskDefinitionDatabase.Entry
+                    Undo.RecordObject(db, "Add TaskDefinition Entry");
+                    db.entries.Add(new TaskDefinitionDatabase.Entry
                     {
                         script      = script,
                         displayName = _newDisplayName,
                         description = _newDescription,
                     });
-                    EditorUtility.SetDirty(_database);
+                    EditorUtility.SetDirty(db);
                     AssetDatabase.SaveAssets();
 
-                    // Reset form & cache; type list sẽ được scan lại khi click dropdown lần nữa
+                    // Reset form
                     _selectedTypeIndex = 0;
                     _newDisplayName    = "";
                     _newDescription    = "";
                     _availableTypes    = Array.Empty<Type>();
-                    _availableOptions  = Array.Empty<string>();
+                    _availableOptions  = new[] { "None" };
                 }
             }
         }
 
-        /// <summary>
-        /// Tìm tất cả type implement ITaskDefinition, loại bỏ những cái đã có trong database.
-        /// Chỉ dùng reflection (AppDomain), không đụng tới AssetDatabase nên tương đối nhẹ.
-        /// </summary>
         static Type[] FindAvailableDefinitionTypes(List<TaskDefinitionDatabase.Entry> entries)
         {
-            // 1) Thu thập type đã có trong DB
             var existing = new HashSet<Type>();
             if (entries != null)
-            {
-                foreach (var e in entries)
+                foreach (var entry in entries)
                 {
-                    if (e?.script == null) continue;
-                    var t = e.script.GetClass();
-                    if (t != null)
-                        existing.Add(t);
+                    if (entry?.script == null) continue;
+                    var t = entry.script.GetClass();
+                    if (t != null) existing.Add(t);
                 }
-            }
 
-            // 2) Quét AppDomain tìm ITaskDefinition hợp lệ
             var result = new List<Type>();
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
             {
-                // Bỏ qua assembly không thể GetTypes
                 Type[] types;
-                try
-                {
-                    types = asm.GetTypes();
-                }
-                catch
-                {
-                    continue;
-                }
+                try { types = asm.GetTypes(); }
+                catch { continue; }
 
                 foreach (var t in types)
                 {
-                    if (t == null) continue;
-                    if (t.IsAbstract || t.IsInterface) continue;
+                    if (t == null || t.IsAbstract || t.IsInterface) continue;
                     if (!typeof(ITaskDefinition).IsAssignableFrom(t)) continue;
                     if (existing.Contains(t)) continue;
                     result.Add(t);
                 }
             }
 
-            return result
-                .OrderBy(t => t.Name)
-                .ToArray();
+            return result.OrderBy(t => t.Name).ToArray();
         }
 
-        /// <summary>
-        /// Tìm MonoScript tương ứng cho một type ITaskDefinition.
-        /// Quét asset lúc bấm Add Entry (một lần), chấp nhận cost này vì không xảy ra liên tục.
-        /// </summary>
         static MonoScript FindMonoScriptForType(Type type)
         {
             if (type == null) return null;
-
-            var guids = AssetDatabase.FindAssets("t:MonoScript");
-            foreach (var guid in guids)
+            foreach (var guid in AssetDatabase.FindAssets("t:MonoScript"))
             {
-                var path   = AssetDatabase.GUIDToAssetPath(guid);
+                var path = AssetDatabase.GUIDToAssetPath(guid);
                 var script = AssetDatabase.LoadAssetAtPath<MonoScript>(path);
-                if (script == null) continue;
-                var t = script.GetClass();
-                if (t == type) return script;
+                if (script != null && script.GetClass() == type)
+                    return script;
             }
-
             return null;
         }
 
-        void ExportToJson(List<TaskDefinitionDatabase.Entry> entries)
+        void ExportToJson(TaskDefinitionDatabase db)
         {
-            if (_database == null || entries == null)
+            if (db.entries == null || db.entries.Count == 0)
             {
-                EditorUtility.DisplayDialog("Export Task Definitions JSON", "Không có database để export.", "OK");
+                EditorUtility.DisplayDialog("Export", "No entries to export.", "OK");
                 return;
             }
 
-            var path = EditorUtility.SaveFilePanel(
-                "Export Task Definitions JSON",
-                "",
-                "TaskDefinitions.json",
-                "json");
-
+            var path = EditorUtility.SaveFilePanel("Export Task Definitions JSON",
+                "", "TaskDefinitions.json", "json");
             if (string.IsNullOrEmpty(path)) return;
 
             var list = new List<SerializableEntry>();
-            foreach (var e in entries)
+            foreach (var entry in db.entries)
             {
-                if (e?.script == null) continue;
-                var type = e.script.GetClass();
+                if (entry?.script == null) continue;
+                var type = entry.script.GetClass();
                 if (type == null) continue;
-
                 list.Add(new SerializableEntry
                 {
                     typeName    = $"{type.FullName}, {type.Assembly.GetName().Name}",
-                    description = e.description ?? string.Empty,
+                    description = entry.description ?? "",
                 });
             }
 
-            var wrapper = new SerializableEntryList { entries = list.ToArray() };
-            var json = JsonUtility.ToJson(wrapper, true);
-
+            var json = JsonUtility.ToJson(new SerializableEntryList { entries = list.ToArray() }, true);
             System.IO.File.WriteAllText(path, json);
             EditorUtility.RevealInFinder(path);
         }
 
-        [Serializable]
-        class SerializableEntry
-        {
-            public string typeName;
-            public string description;
-        }
-
-        [Serializable]
-        class SerializableEntryList
-        {
-            public SerializableEntry[] entries;
-        }
+        [Serializable] class SerializableEntry { public string typeName; public string description; }
+        [Serializable] class SerializableEntryList { public SerializableEntry[] entries; }
     }
 }
