@@ -17,7 +17,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         public void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor)
         {
-            dependencyInjectionVisitor.Visit(root);
+            root.Accept(dependencyInjectionVisitor);
         }
 
         public CancellationTokenSource Execute()

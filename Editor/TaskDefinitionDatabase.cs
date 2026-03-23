@@ -17,12 +17,19 @@ namespace Hlight.Structures.CompositeTask.Editor
         [Serializable]
         public class Entry
         {
+            public enum TypeSerializationBindingMode
+            {
+                ByDisplayName,
+                ByTypeName,
+                ByTypeFullName,
+            }
+            
             /// <summary>
             /// Tên hiển thị trong editor (nếu để trống sẽ dùng tên type).
             /// </summary>
             public string displayName;
 
-            public bool useFullNameWhenSerializationBinding;
+            [SerializeField] private TypeSerializationBindingMode typeSerializationBindingMode;
 
             /// <summary>
             /// MonoScript trỏ tới class implement ITaskDefinition.
@@ -34,6 +41,20 @@ namespace Hlight.Structures.CompositeTask.Editor
             /// </summary>
             [TextArea]
             public string description;
+
+            public string TypeSerializationBindingName
+            {
+                get
+                {
+                    var type = script?.GetClass();
+                    return typeSerializationBindingMode switch
+                    {
+                        TypeSerializationBindingMode.ByDisplayName => displayName,
+                        TypeSerializationBindingMode.ByTypeName => type.Name,
+                        TypeSerializationBindingMode.ByTypeFullName => type.FullName,
+                    };
+                }
+            }
         }
 
         public List<Entry> entries = new List<Entry>();
