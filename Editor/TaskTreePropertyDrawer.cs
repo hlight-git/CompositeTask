@@ -107,29 +107,8 @@ namespace Hlight.Structures.CompositeTask.Editor
             // Enabled cache
             public Dictionary<ATaskNode, bool> enabledCache = new();
 
-            // Database
-            private TaskDefinitionDatabase database;
-            public TaskDefinitionDatabase Database
-            {
-                get
-                {
-                    if (database != null) return database;
-                    
-                    var guids = AssetDatabase.FindAssets($"t:{nameof(TaskDefinitionDatabase)}");
-                    if (guids == null || guids.Length == 0)
-                    {
-                        database = ScriptableObject.CreateInstance<TaskDefinitionDatabase>();
-                        AssetDatabase.CreateAsset(database, $"Assets/Editor Default Resources/{nameof(TaskDefinitionDatabase)}.asset");
-                        AssetDatabase.Refresh();
-                    }
-                    else
-                    {
-                        database = AssetDatabase.LoadAssetAtPath<TaskDefinitionDatabase>(AssetDatabase.GUIDToAssetPath(guids[0]));
-                    }
-                    
-                    return database;
-                }
-            }
+            // Registry entries (cached from [TaskDefinition] attribute scan)
+            public List<TaskDefinitionRegistry.Entry> RegistryEntries => TaskDefinitionRegistry.Entries;
 
             // Styles
             public GUIStyle labelStyle;
@@ -440,7 +419,7 @@ namespace Hlight.Structures.CompositeTask.Editor
             return new JsonSerializerSettings
             {
                 TypeNameHandling = TypeNameHandling.Auto,
-                SerializationBinder = new TaskTreeSerializationBinder(s.Database),
+                SerializationBinder = new TaskTreeSerializationBinder(),
                 Formatting = Formatting.Indented,
             };
         }
@@ -1566,7 +1545,7 @@ namespace Hlight.Structures.CompositeTask.Editor
         }
 
         /// <summary>
-        /// Vẽ TaskDefinition section: type popup từ TaskDefinitionDatabase + child fields.
+        /// Vẽ TaskDefinition section: type popup từ [TaskDefinition] registry + child fields.
         /// </summary>
         static float DrawTaskDefinitionSection(DrawerState s, SerializedObject so, SerializedProperty nodeProp,
                                                 MonoTaskNode mono, UnityEngine.Object targetObj,
@@ -1574,20 +1553,13 @@ namespace Hlight.Structures.CompositeTask.Editor
         {
             float lineH = EditorGUIUtility.singleLineHeight;
 
-            // Build type list from database
+            // Build type list from [TaskDefinition] attribute registry
             var types = new List<Type>();
             var names = new List<string>();
-            if (s.Database?.entries != null)
+            foreach (var entry in s.RegistryEntries)
             {
-                foreach (var entry in s.Database.entries)
-                {
-                    if (entry?.script == null) continue;
-                    var t = entry.script.GetClass();
-                    if (t == null || t.IsAbstract || t.IsInterface) continue;
-                    if (!typeof(ITaskDefinition).IsAssignableFrom(t)) continue;
-                    types.Add(t);
-                    names.Add(string.IsNullOrEmpty(entry.displayName) ? t.Name : entry.displayName);
-                }
+                types.Add(entry.Type);
+                names.Add(entry.DisplayName);
             }
 
             // Current index
@@ -2214,26 +2186,19 @@ namespace Hlight.Structures.CompositeTask.Editor
 
         /// <summary>
         /// Vẽ TaskDefinition section trong Odin path: custom type popup + Odin property drawing.
-        /// Ẩn Odin polymorphism selector, chỉ show popup từ TaskDefinitionDatabase.
+        /// Ẩn Odin polymorphism selector, chỉ show popup từ [TaskDefinition] registry.
         /// </summary>
         void DrawTaskDefinitionOdin(TaskTreePropertyDrawer.DrawerState s,
                                      Sirenix.OdinInspector.Editor.InspectorProperty taskTreeProp,
                                      TaskTree taskTree, MonoTaskNode mono, UnityEngine.Object targetObj)
         {
-            // Build type list from database
+            // Build type list from [TaskDefinition] attribute registry
             var types = new List<Type>();
             var names = new List<string>();
-            if (s.Database?.entries != null)
+            foreach (var entry in s.RegistryEntries)
             {
-                foreach (var entry in s.Database.entries)
-                {
-                    if (entry?.script == null) continue;
-                    var t = entry.script.GetClass();
-                    if (t == null || t.IsAbstract || t.IsInterface) continue;
-                    if (!typeof(ITaskDefinition).IsAssignableFrom(t)) continue;
-                    types.Add(t);
-                    names.Add(string.IsNullOrEmpty(entry.displayName) ? t.Name : entry.displayName);
-                }
+                types.Add(entry.Type);
+                names.Add(entry.DisplayName);
             }
 
             // Current index

@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using Hlight.Structures.CompositeTask.Runtime;
 using Newtonsoft.Json.Serialization;
-using UnityEngine;
 
 namespace Hlight.Structures.CompositeTask.Editor
 {
@@ -10,9 +9,8 @@ namespace Hlight.Structures.CompositeTask.Editor
     {
         private readonly Dictionary<Type, string> typeToName;
         private readonly Dictionary<string, Type> nameToType;
-        private TaskDefinitionDatabase database;
 
-        public TaskTreeSerializationBinder(TaskDefinitionDatabase database)
+        public TaskTreeSerializationBinder()
         {
             typeToName = new Dictionary<Type, string>
             {
@@ -20,15 +18,9 @@ namespace Hlight.Structures.CompositeTask.Editor
                 {typeof(MonoTaskNode), nameof(MonoTaskNode)},
             };
 
-            if (database != null && database.entries != null)
+            foreach (var entry in TaskDefinitionRegistry.Entries)
             {
-                foreach (var entry in database.entries)
-                {
-                    if (entry.script == null) continue;
-                    var type = entry.script.GetClass();
-                    if (type == null) continue;
-                    typeToName.TryAdd(type, entry.TypeSerializationBindingName);
-                }
+                typeToName.TryAdd(entry.Type, entry.BindingName);
             }
 
             nameToType = new();
@@ -42,14 +34,14 @@ namespace Hlight.Structures.CompositeTask.Editor
         {
             if (nameToType.TryGetValue(typeName, out var type))
                 return type;
-            throw new InvalidOperationException($"Unknown task type: '{typeName}'. Ensure it is registered in TaskDefinitionDatabase.");
+            throw new InvalidOperationException($"Unknown task type: '{typeName}'. Ensure it has a [TaskDefinition] attribute.");
         }
 
         public void BindToName(Type serializedType, out string assemblyName, out string typeName)
         {
             assemblyName = null;
             if (!typeToName.TryGetValue(serializedType, out typeName))
-                throw new InvalidOperationException($"Unknown type: '{serializedType.FullName}'. Ensure it is registered in TaskDefinitionDatabase.");
+                throw new InvalidOperationException($"Unknown type: '{serializedType.FullName}'. Ensure it has a [TaskDefinition] attribute.");
         }
     }
 }
