@@ -23,10 +23,9 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         public override void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor)
         {
+            if (children == null) return;
             foreach (var child in children)
-            {
-                child.taskNode.Accept(dependencyInjectionVisitor);
-            }
+                child?.taskNode?.Accept(dependencyInjectionVisitor);
         }
 
         protected override async UniTask RunTheTask(CancellationToken cancellationToken)
@@ -56,7 +55,9 @@ namespace Hlight.Structures.CompositeTask.Runtime
         {
             foreach (var child in children)
             {
-                if (child.enabled && child.taskNode.Status != TaskNodeStatus.Completed) return false;
+                if (!child.enabled) continue;
+                var status = child.taskNode.Status;
+                if (status != TaskNodeStatus.Completed && status != TaskNodeStatus.Failed) return false;
             }
 
             return true;
@@ -96,13 +97,13 @@ namespace Hlight.Structures.CompositeTask.Runtime
             if (Status != TaskNodeStatus.Running) return;
 
             var subTaskValueSum = GetSubTaskValueSum();
-            if (subTaskValueSum > 0)
+            var oldSum = subTaskValueSum - child.subTaskValue;
+            if (subTaskValueSum > 0f && oldSum > 0f)
             {
-                var oldProgressPoint = Progress * (subTaskValueSum - child.subTaskValue);
-                Progress = oldProgressPoint / subTaskValueSum;
+                Progress = Progress * oldSum / subTaskValueSum;
             }
 
-            if (executionMode == ExecutionMode.Parallel)
+            if (executionMode == ExecutionMode.Parallel && taskFinishCts != null)
                 ExecuteChildNode(child.taskNode, taskFinishCts.Token).Forget();
         }
     }

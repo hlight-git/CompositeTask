@@ -24,27 +24,32 @@ namespace Hlight.Structures.CompositeTask.Editor
             {
                 foreach (var entry in database.entries)
                 {
+                    if (entry.script == null) continue;
                     var type = entry.script.GetClass();
-                    typeToName.Add(type, entry.TypeSerializationBindingName);
+                    if (type == null) continue;
+                    typeToName.TryAdd(type, entry.TypeSerializationBindingName);
                 }
             }
 
             nameToType = new();
             foreach (var item in typeToName)
             {
-                nameToType.Add(item.Value, item.Key);
+                nameToType.TryAdd(item.Value, item.Key);
             }
         }
 
         public Type BindToType(string assemblyName, string typeName)
         {
-            return nameToType[typeName];
+            if (nameToType.TryGetValue(typeName, out var type))
+                return type;
+            throw new InvalidOperationException($"Unknown task type: '{typeName}'. Ensure it is registered in TaskDefinitionDatabase.");
         }
 
         public void BindToName(Type serializedType, out string assemblyName, out string typeName)
         {
             assemblyName = null;
-            typeName = typeToName[serializedType];
+            if (!typeToName.TryGetValue(serializedType, out typeName))
+                throw new InvalidOperationException($"Unknown type: '{serializedType.FullName}'. Ensure it is registered in TaskDefinitionDatabase.");
         }
     }
 }

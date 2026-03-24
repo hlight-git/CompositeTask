@@ -5,6 +5,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
         Pending,
         Running,
         Finishing,
-        Completed
+        Completed,
+        Failed
     }
 }

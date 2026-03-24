@@ -43,6 +43,7 @@ namespace Hlight.Structures.CompositeTask.Editor
         static readonly Color DividerColor        = new(0.1f, 0.1f, 0.1f);
         internal static readonly Color StatusRunning       = new(0.2f, 0.8f, 1f);
         internal static readonly Color StatusCompleted     = new(0.2f, 0.85f, 0.3f);
+        internal static readonly Color StatusFailed        = new(1f, 0.25f, 0.2f);
         internal static readonly Color StatusPending       = new(0.45f, 0.45f, 0.45f);
         static readonly Color DisabledTextColor   = new(0.5f, 0.5f, 0.5f);
         static readonly Color ErrorTextColor      = new(1f, 0.25f, 0.25f);
@@ -659,6 +660,7 @@ namespace Hlight.Structures.CompositeTask.Editor
                 {
                     TaskNodeStatus.Running   => StatusRunning,
                     TaskNodeStatus.Completed => StatusCompleted,
+                    TaskNodeStatus.Failed    => StatusFailed,
                     _                        => StatusPending,
                 };
                 if (e.type == EventType.Repaint)
@@ -2170,6 +2172,7 @@ namespace Hlight.Structures.CompositeTask.Editor
                         {
                             TaskNodeStatus.Running   => TaskTreePropertyDrawer.StatusRunning,
                             TaskNodeStatus.Completed => TaskTreePropertyDrawer.StatusCompleted,
+                            TaskNodeStatus.Failed    => TaskTreePropertyDrawer.StatusFailed,
                             _                        => TaskTreePropertyDrawer.StatusPending,
                         };
                         var oldColor = GUI.contentColor;

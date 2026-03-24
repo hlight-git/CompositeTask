@@ -51,7 +51,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
         public override void Dispose()
         {
             base.Dispose();
-            taskDefinition.Dispose(this);
+            taskDefinition?.Dispose(this);
         }
     }
 }

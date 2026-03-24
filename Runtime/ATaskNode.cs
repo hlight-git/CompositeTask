@@ -44,12 +44,12 @@ namespace Hlight.Structures.CompositeTask.Runtime
         public async UniTask ExecuteAsync(CancellationToken externalCancellationToken)
         {
             if (Status == TaskNodeStatus.Completed) return;
-            
+
             Status = TaskNodeStatus.Running;
-            
+
             taskRunningCts = new CancellationTokenSource();
             taskFinishCts = new CancellationTokenSource();
-            
+
             var registration = externalCancellationToken.Register(CancelAllCancellationTokenSources);
 
 #if COMPOSITE_TASK_DEBUG && UNITY_EDITOR
@@ -59,17 +59,27 @@ namespace Hlight.Structures.CompositeTask.Runtime
                 .Register(() => TryWarningNotUseCancellationToken(false).Forget());
 #endif
 
-            await Try(RunTheTask(taskRunningCts.Token));
-            Status = TaskNodeStatus.Finishing;
-            if (!taskFinishCts.IsCancellationRequested)
-                await Try(FinishTheTask(taskFinishCts.Token));
-            OnCompleted();
-            await registration.DisposeAsync();
-            
+            try
+            {
+                await Try(RunTheTask(taskRunningCts.Token));
+                Status = TaskNodeStatus.Finishing;
+                if (!taskFinishCts.IsCancellationRequested)
+                    await Try(FinishTheTask(taskFinishCts.Token));
+                OnCompleted();
+            }
+            finally
+            {
+                await registration.DisposeAsync();
+                taskRunningCts?.Dispose();
+                taskRunningCts = null;
+                taskFinishCts?.Dispose();
+                taskFinishCts = null;
+
 #if COMPOSITE_TASK_DEBUG && UNITY_EDITOR
-            await beginDebugRegistration.DisposeAsync();
-            await endDebugRegistration.DisposeAsync();
+                await beginDebugRegistration.DisposeAsync();
+                await endDebugRegistration.DisposeAsync();
 #endif
+            }
         }
         
 #if COMPOSITE_TASK_DEBUG && UNITY_EDITOR
@@ -83,8 +93,8 @@ namespace Hlight.Structures.CompositeTask.Runtime
         
         protected virtual void CancelAllCancellationTokenSources()
         {
-            taskRunningCts.Cancel();
-            taskFinishCts.Cancel();
+            taskRunningCts?.Cancel();
+            taskFinishCts?.Cancel();
         }
 
         protected virtual void OnCompleted()
@@ -101,6 +111,11 @@ namespace Hlight.Structures.CompositeTask.Runtime
                 await task;
             }
             catch (OperationCanceledException) {}
+            catch (Exception ex)
+            {
+                Debug.LogException(ex);
+                Status = TaskNodeStatus.Failed;
+            }
         }
 
         public virtual void Reset()
@@ -108,17 +123,15 @@ namespace Hlight.Structures.CompositeTask.Runtime
             if (taskRunningCts != null)
             {
                 taskRunningCts.Cancel();
-                taskRunningCts.Dispose();
                 taskRunningCts = null;
             }
 
             if (taskFinishCts != null)
             {
                 taskFinishCts.Cancel();
-                taskFinishCts.Dispose();
                 taskFinishCts = null;
             }
-            
+
             ProgressChanged = null;
             Completed = null;
             Status = TaskNodeStatus.Pending;
