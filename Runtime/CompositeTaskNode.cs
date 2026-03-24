@@ -29,7 +29,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
             }
         }
 
-        protected override async UniTask OnTaskBegin(CancellationToken cancellationToken)
+        protected override async UniTask RunTheTask(CancellationToken cancellationToken)
         {
             if (executionMode == ExecutionMode.Sequential)
             {
@@ -46,9 +46,8 @@ namespace Hlight.Structures.CompositeTask.Runtime
             }
         }
 
-        protected override UniTask OnTaskEnd(CancellationToken cancellationToken)
+        protected override UniTask FinishTheTask(CancellationToken cancellationToken)
         {
-            if (cancellationToken.IsCancellationRequested) return UniTask.CompletedTask;
             if (IsAllChildNodesCompleted()) return UniTask.CompletedTask;
             return UniTask.WaitUntil(IsAllChildNodesCompleted, cancellationToken: cancellationToken);
         }
@@ -76,9 +75,6 @@ namespace Hlight.Structures.CompositeTask.Runtime
             if (sum <= 0f) return;
             var child = children.Find(c => c.taskNode == childTaskNode);
             Progress += delta * child.subTaskValue / sum;
-
-            if (Progress >= targetProgressToComplete)
-                ForceComplete();
         }
         
         private float GetSubTaskValueSum()
@@ -107,7 +103,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
             }
 
             if (executionMode == ExecutionMode.Parallel)
-                ExecuteChildNode(child.taskNode, taskEndCancellationTokenSource.Token).Forget();
+                ExecuteChildNode(child.taskNode, taskFinishCts.Token).Forget();
         }
     }
 }

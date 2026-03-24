@@ -13,15 +13,33 @@ namespace Hlight.Structures.CompositeTask.Runtime
             (taskDefinition as IDependencyInjectionVisitable)?.Accept(dependencyInjectionVisitor);
         }
 
-        protected override UniTask OnTaskBegin(CancellationToken cancellationToken)
+#if COMPOSITE_TASK_DEBUG && UNITY_EDITOR
+        protected override async UniTask TryWarningNotUseCancellationToken(bool isRunning)
         {
-            return taskDefinition.OnBegin(this, cancellationToken);
+            await base.TryWarningNotUseCancellationToken(isRunning);
+            await UniTask.Yield();
+            
+            if (isRunning && Status == TaskNodeStatus.Running)
+            {
+                Debug.LogError($"- Task {name}: The {nameof(ITaskDefinition.OnRunning)} method might not be using CancellationToken correctly!");
+                return;
+            }
+                
+            if (!isRunning && Status == TaskNodeStatus.Finishing)
+            {
+                Debug.LogError($"- Task {name}: The {nameof(ITaskDefinition.OnFinishing)} method might not be using CancellationToken correctly!");
+            }
+        }
+#endif
+
+        protected override UniTask RunTheTask(CancellationToken cancellationToken)
+        {
+            return taskDefinition.OnRunning(this, cancellationToken);
         }
 
-        protected override UniTask OnTaskEnd(CancellationToken cancellationToken)
+        protected override UniTask FinishTheTask(CancellationToken cancellationToken)
         {
-            if (cancellationToken.IsCancellationRequested) return UniTask.CompletedTask;
-            return taskDefinition.OnEnd(this, cancellationToken);
+            return taskDefinition.OnFinishing(this, cancellationToken);
         }
 
         protected override void OnCompleted()
@@ -30,10 +48,10 @@ namespace Hlight.Structures.CompositeTask.Runtime
             base.OnCompleted();
         }
 
-        protected override void CancelAllCancellationTokenSources()
+        public override void Dispose()
         {
-            base.CancelAllCancellationTokenSources();
-            taskDefinition.OnCanceledWhenRunning(this);
+            base.Dispose();
+            taskDefinition.Dispose(this);
         }
     }
 }

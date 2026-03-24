@@ -6,7 +6,7 @@ using Cysharp.Threading.Tasks;
 namespace Hlight.Structures.CompositeTask.Runtime
 {
     [Serializable]
-    public class TaskTree
+    public class TaskTree : IDisposable
     {
         public CompositeTaskNode root = new()
         {
@@ -25,6 +25,11 @@ namespace Hlight.Structures.CompositeTask.Runtime
             var cancellationTokenSource = new CancellationTokenSource();
             root.ExecuteAsync(cancellationTokenSource.Token).Forget();
             return cancellationTokenSource;
+        }
+
+        public void Dispose()
+        {
+            root?.Dispose();
         }
     }
 }

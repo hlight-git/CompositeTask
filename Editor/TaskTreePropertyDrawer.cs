@@ -1688,7 +1688,7 @@ namespace Hlight.Structures.CompositeTask.Editor
             if (GUI.Button(new Rect(x, y, btnW, lineH), "ForceComplete"))
                 node.ForceComplete();
             if (GUI.Button(new Rect(x + btnW + 4, y, btnW, lineH), "ForceImmediate"))
-                node.ForceCompleteImmediate();
+                node.ForceComplete(true);
             if (GUI.Button(new Rect(x + 2 * (btnW + 4), y, btnW, lineH), "Reset"))
                 node.Reset();
             y += lineH + 2;
@@ -2186,7 +2186,7 @@ namespace Hlight.Structures.CompositeTask.Editor
                         if (GUI.Button(new Rect(btnRect2.x, btnRect2.y, btnW, btnRect2.height), "ForceComplete"))
                             s.selected.ForceComplete();
                         if (GUI.Button(new Rect(btnRect2.x + btnW + 4, btnRect2.y, btnW, btnRect2.height), "ForceImmediate"))
-                            s.selected.ForceCompleteImmediate();
+                            s.selected.ForceComplete(true);
                         if (GUI.Button(new Rect(btnRect2.x + 2*(btnW+4), btnRect2.y, btnW, btnRect2.height), "Reset"))
                             s.selected.Reset();
                         EditorGUI.indentLevel--;
