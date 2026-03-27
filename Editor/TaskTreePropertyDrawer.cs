@@ -1001,7 +1001,7 @@ namespace Hlight.Structures.CompositeTask.Editor
 
             foreach (var node in nodesToMove)
             {
-                float sv = svMap.TryGetValue(node, out float v) ? v : 1f;
+                float sv = svMap.GetValueOrDefault(node, 0f);
                 s.dropParentTarget.children.Insert(adjustedInsert, new CompositeTaskNode.Child
                 { subTaskValue = sv, taskNode = node });
                 adjustedInsert++;
@@ -1334,7 +1334,7 @@ namespace Hlight.Structures.CompositeTask.Editor
             Undo.RegisterCompleteObjectUndo(targetObj, "Add Mono Task");
             if (parent.children == null) parent.children = new List<CompositeTaskNode.Child>();
             parent.children.Add(new CompositeTaskNode.Child
-            { subTaskValue = 1f, taskNode = new MonoTaskNode { name = "New Mono Task" } });
+            { subTaskValue = 0, taskNode = new MonoTaskNode { name = "New Mono Task" } });
             SetExpanded(s, parent, true);
             MarkDirty(targetObj);
         }
@@ -1346,7 +1346,7 @@ namespace Hlight.Structures.CompositeTask.Editor
             if (parent.children == null) parent.children = new List<CompositeTaskNode.Child>();
             var node = new CompositeTaskNode
             { name = "New Composite", executionMode = mode, children = new List<CompositeTaskNode.Child>() };
-            parent.children.Add(new CompositeTaskNode.Child { subTaskValue = 1f, taskNode = node });
+            parent.children.Add(new CompositeTaskNode.Child { subTaskValue = 0, taskNode = node });
             SetExpanded(s, parent, true);
             SetExpanded(s, node, true);
             MarkDirty(targetObj);
@@ -1438,7 +1438,7 @@ namespace Hlight.Structures.CompositeTask.Editor
             {
                 var clone = DeepClone(src);
                 clone.name = MakeUniqueSiblingName(parent, src.name);
-                parent.children.Add(new CompositeTaskNode.Child { enabled = true, subTaskValue = 1f, taskNode = clone });
+                parent.children.Add(new CompositeTaskNode.Child { enabled = true, subTaskValue = 0, taskNode = clone });
                 s.multiSelected.Add(clone);
             }
             SetExpanded(s, parent, true);
