@@ -53,5 +53,10 @@ namespace Hlight.Structures.CompositeTask.Runtime
             base.Dispose();
             taskDefinition?.Dispose(this);
         }
+
+        public void IncreaseProgress(float value, ITaskDefinition requester)
+        {
+            if (requester == taskDefinition) Progress += value;
+        }
     }
 }
