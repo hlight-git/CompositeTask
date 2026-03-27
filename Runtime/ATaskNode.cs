@@ -47,6 +47,15 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
             Status = TaskNodeStatus.Running;
 
+            try
+            {
+                OnBeginExecute();
+            }
+            catch (Exception e)
+            {
+                Debug.LogException(e);
+            }
+
             taskRunningCts = new CancellationTokenSource();
             taskFinishCts = new CancellationTokenSource();
 
@@ -160,6 +169,8 @@ namespace Hlight.Structures.CompositeTask.Runtime
         }
 
         public abstract void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor);
+
+        protected internal abstract void OnBeginExecute();
         protected abstract UniTask RunTheTask(CancellationToken cancellationToken);
         protected abstract UniTask FinishTheTask(CancellationToken cancellationToken);
     }

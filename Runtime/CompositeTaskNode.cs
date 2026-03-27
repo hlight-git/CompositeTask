@@ -27,6 +27,13 @@ namespace Hlight.Structures.CompositeTask.Runtime
             foreach (var child in children)
                 child?.taskNode?.Accept(dependencyInjectionVisitor);
         }
+        
+        protected internal override void OnBeginExecute()
+        {
+            if (children == null) return;
+            foreach (var child in children)
+                child?.taskNode?.OnBeginExecute();
+        }
 
         protected override async UniTask RunTheTask(CancellationToken cancellationToken)
         {

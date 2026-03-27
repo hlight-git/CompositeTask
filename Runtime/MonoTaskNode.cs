@@ -13,6 +13,11 @@ namespace Hlight.Structures.CompositeTask.Runtime
             (taskDefinition as IDependencyInjectionVisitable)?.Accept(dependencyInjectionVisitor);
         }
 
+        protected internal override void OnBeginExecute()
+        {
+            taskDefinition.Awake();
+        }
+
 #if COMPOSITE_TASK_DEBUG && UNITY_EDITOR
         protected override async UniTask TryWarningNotUseCancellationToken(bool isRunning)
         {
@@ -51,7 +56,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
         public override void Dispose()
         {
             base.Dispose();
-            taskDefinition?.Dispose(this);
+            taskDefinition?.Dispose();
         }
 
         public void IncreaseProgress(float value, ITaskDefinition requester)
