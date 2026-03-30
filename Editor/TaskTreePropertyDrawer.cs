@@ -77,14 +77,27 @@ namespace Hlight.Structures.CompositeTask.Editor
             public TextAsset importJson;
             public DefaultAsset exportFolder;
 
-            // Hierarchy / Selection
-            public ATask selected;
-            public HashSet<ATask> multiSelected = new();
-            public ATask lastClicked;
+            // Hierarchy / Selection (NavEntry-based)
+            public List<NavEntry> navList = new();         // rebuilt each frame
+            public int primaryNavIndex = -1;               // current primary selection
+            public int anchorNavIndex = -1;                // shift-select anchor
+            public HashSet<int> selectedNavIndices = new(); // multi-selection indices
             public Dictionary<ATask, bool> expanded = new();
             public string searchFilter = "";
             public Vector2 hierarchyScroll;
             public Rect hierarchyScrollRect;
+
+            // Convenience accessors
+            public ATask SelectedTask => primaryNavIndex >= 0 && primaryNavIndex < navList.Count
+                ? navList[primaryNavIndex].task : null;
+            public NavEntry? PrimaryEntry => primaryNavIndex >= 0 && primaryNavIndex < navList.Count
+                ? navList[primaryNavIndex] : null;
+            public bool IsNavSelected(int idx) => selectedNavIndices.Contains(idx);
+
+            // Deferred selection (resolved after navList rebuild)
+            public ATask pendingSelectTask;
+            public Runtime.CompositeTask pendingSelectEmptyParent;
+            public int pendingSelectEmptyIndex = -1;
 
             // Rename
             public ATask renamingNode;
@@ -195,8 +208,9 @@ namespace Hlight.Structures.CompositeTask.Editor
             if (Application.isPlaying)
                 h += EditorGUIUtility.singleLineHeight + 4;
 
-            // Inspector foldout (only when node selected)
-            if (s.selected != null)
+            // Inspector foldout (when anything selected — task or empty child)
+            bool hasAnySelection = s.SelectedTask != null || (s.PrimaryEntry?.IsEmpty == true);
+            if (hasAnySelection)
             {
                 h += EditorGUIUtility.singleLineHeight + 2; // foldout header
                 if (GetFoldout(s, FoldoutInspector))
@@ -206,51 +220,57 @@ namespace Hlight.Structures.CompositeTask.Editor
             return h;
         }
 
-        /// <summary>
-        /// Calculate exact inspector content height based on SerializedProperty.
-        /// </summary>
         static float CalculateInspectorHeight(DrawerState s, SerializedProperty property)
         {
-            string nodePath = FindNodePropertyPath(property, s.selected);
-            if (nodePath == null) return 0;
-
-            var so = property.serializedObject;
-            var nodeProp = so.FindProperty(nodePath);
-            if (nodeProp == null) return 0;
-
             float h = 0;
             float lineH = EditorGUIUtility.singleLineHeight + 2;
             var taskTree = GetTaskTreeFromProperty(property);
-            bool isNonRoot = taskTree != null && s.selected != taskTree.root &&
-                             nodePath.EndsWith(".task");
+            bool isNonRoot = true;
+            ATask task = null;
 
-            // Row 1: [Enabled + Name] or [Name]
-            h += lineH;
-
-            // Row 2: SubTaskValue (non-root)
-            if (isNonRoot) h += lineH;
-
-            // Remaining properties (skip name, children)
-            var iter = nodeProp.Copy();
-            var endProp = nodeProp.GetEndProperty();
-            bool enterChildren = true;
-            while (iter.NextVisible(enterChildren) && !SerializedProperty.EqualContents(iter, endProp))
+            if (s.SelectedTask != null)
             {
-                enterChildren = false;
-                if (iter.name == "name" || iter.name == "children") continue;
-                h += EditorGUI.GetPropertyHeight(iter, true) + 2;
+                task = s.SelectedTask;
+                isNonRoot = task != taskTree?.root;
             }
 
-            // Task type popup row (non-root only)
+            // Row 1: Enabled + Name (or just Name for root)
+            h += lineH;
+
+            // SubTaskValue (non-root)
             if (isNonRoot) h += lineH;
 
-            // Runtime inspector (Play Mode)
-            if (Application.isPlaying)
-                h += lineH * 4 + 8;
+            // Task type popup (non-root)
+            if (isNonRoot) h += lineH;
 
-            // Add Child buttons for Runtime.CompositeTask
-            if (s.selected is Runtime.CompositeTask)
-                h += EditorGUIUtility.singleLineHeight + 6;
+            // Task-specific fields (only if task != null)
+            if (task != null)
+            {
+                string nodePath = FindNodePropertyPath(property, task);
+                if (nodePath != null)
+                {
+                    var so = property.serializedObject;
+                    var nodeProp = so.FindProperty(nodePath);
+                    if (nodeProp != null)
+                    {
+                        var iter = nodeProp.Copy();
+                        var endProp = nodeProp.GetEndProperty();
+                        bool enterChildren = true;
+                        while (iter.NextVisible(enterChildren) && !SerializedProperty.EqualContents(iter, endProp))
+                        {
+                            enterChildren = false;
+                            if (iter.name == "name" || iter.name == "children") continue;
+                            h += EditorGUI.GetPropertyHeight(iter, true) + 2;
+                        }
+                    }
+                }
+
+                if (Application.isPlaying)
+                    h += lineH * 4 + 8;
+
+                if (task is Runtime.CompositeTask)
+                    h += EditorGUIUtility.singleLineHeight + 6;
+            }
 
             return h + 8;
         }
@@ -273,6 +293,26 @@ namespace Hlight.Structures.CompositeTask.Editor
             var targetObj = property.serializedObject.targetObject;
 
             RebuildEnabledCache(s, taskTree);
+
+            // Rebuild navList each frame
+            s.navList.Clear();
+            if (taskTree?.root != null)
+                BuildNavList(s, taskTree.root, null, -1, s.navList);
+
+            // Resolve deferred selection
+            if (s.pendingSelectTask != null)
+            {
+                int idx = FindNavIndexForTask(s, s.pendingSelectTask);
+                if (idx >= 0) SelectSingle(s, idx);
+                s.pendingSelectTask = null;
+            }
+            else if (s.pendingSelectEmptyParent != null && s.pendingSelectEmptyIndex >= 0)
+            {
+                int idx = FindNavIndexForEmpty(s, s.pendingSelectEmptyParent, s.pendingSelectEmptyIndex);
+                if (idx >= 0) SelectSingle(s, idx);
+                s.pendingSelectEmptyParent = null;
+                s.pendingSelectEmptyIndex = -1;
+            }
 
             EditorGUI.BeginProperty(position, label, property);
 
@@ -373,7 +413,9 @@ namespace Hlight.Structures.CompositeTask.Editor
             }
 
             // -- Inspector Foldout --
-            if (s.selected != null)
+            bool hasSelection = s.SelectedTask != null;
+            bool hasEmptySelection = s.PrimaryEntry?.IsEmpty == true;
+            if (hasSelection || hasEmptySelection)
             {
                 var inspFoldRect = new Rect(contentX, y, contentW, EditorGUIUtility.singleLineHeight);
                 SetFoldout(s, FoldoutInspector, EditorGUI.Foldout(inspFoldRect, GetFoldout(s, FoldoutInspector), "Inspector", true));
@@ -381,35 +423,125 @@ namespace Hlight.Structures.CompositeTask.Editor
 
                 if (GetFoldout(s, FoldoutInspector))
                 {
-                    string nodePath = FindNodePropertyPath(property, s.selected);
-                    if (nodePath != null)
+                    // Resolve which child entry is selected (normal or empty)
+                    Runtime.CompositeTask selParent;
+                    int selChildIdx;
+                    if (hasSelection)
                     {
-                        var so = property.serializedObject;
-                        so.Update();
-                        var nodeProp = so.FindProperty(nodePath);
-                        if (nodeProp != null)
-                        {
-                            y = DrawNodeProperties(s, so, nodeProp, nodePath,
-                                                   s.selected, taskTree, targetObj,
-                                                   contentX, y, contentW);
-                            if (so.ApplyModifiedProperties())
-                                MarkDirty(targetObj);
-                        }
+                        FindParent(taskTree.root, s.SelectedTask, out selParent, out selChildIdx);
+                    }
+                    else
+                    {
+                        var entry = s.PrimaryEntry.Value;
+                        selParent = entry.parent;
+                        selChildIdx = entry.childIndex;
                     }
 
-                    // Runtime inspector (Play Mode)
-                    if (Application.isPlaying)
-                        y = DrawRuntimeInspector(s.selected, contentX, y, contentW);
+                    bool isNonRoot = hasSelection ? s.SelectedTask != taskTree.root : true;
+                    float lineH = EditorGUIUtility.singleLineHeight;
 
-                    // Add child button for CompositeTask
-                    if (s.selected is Runtime.CompositeTask comp)
+                    // -- Row 1: [Enabled] [Name] --
+                    if (isNonRoot && selParent != null && selChildIdx >= 0 && selChildIdx < selParent.children.Count)
                     {
-                        y += 4;
-                        float lineH = EditorGUIUtility.singleLineHeight;
-                        var addBtnRect = new Rect(contentX, y, contentW, lineH);
-                        if (GUI.Button(addBtnRect, "+ Add Child"))
-                            ShowAddChildPopup(s, addBtnRect, comp, taskTree, targetObj);
+                        var childData = selParent.children[selChildIdx];
+                        float toggleW = 18f;
+
+                        // Enabled
+                        EditorGUI.BeginChangeCheck();
+                        bool newEnabled = EditorGUI.Toggle(new Rect(contentX, y, toggleW, lineH), childData.enabled);
+                        if (EditorGUI.EndChangeCheck())
+                        {
+                            Undo.RegisterCompleteObjectUndo(targetObj, "Toggle Enabled");
+                            childData.enabled = newEnabled;
+                            MarkDirty(targetObj);
+                        }
+
+                        // Name
+                        string curName = childData.task?.name ?? "";
+                        EditorGUI.BeginChangeCheck();
+                        string newName = EditorGUI.TextField(new Rect(contentX + toggleW + 2, y, contentW - toggleW - 2, lineH), curName);
+                        if (EditorGUI.EndChangeCheck())
+                        {
+                            Undo.RegisterCompleteObjectUndo(targetObj, "Rename");
+                            if (childData.task != null) childData.task.name = newName;
+                            MarkDirty(targetObj);
+                        }
                         y += lineH + 2;
+
+                        // -- Row 2: SubTaskValue --
+                        EditorGUI.BeginChangeCheck();
+                        float newSv = EditorGUI.FloatField(new Rect(contentX, y, contentW, lineH),
+                            new GUIContent("Sub Task Value"), childData.subTaskValue);
+                        if (EditorGUI.EndChangeCheck())
+                        {
+                            Undo.RegisterCompleteObjectUndo(targetObj, "Edit SubTaskValue");
+                            childData.subTaskValue = Mathf.Max(0f, newSv);
+                            MarkDirty(targetObj);
+                        }
+                        y += lineH + 2;
+                    }
+                    else if (!isNonRoot && hasSelection)
+                    {
+                        // Root: name only
+                        EditorGUI.BeginChangeCheck();
+                        string newName = EditorGUI.TextField(new Rect(contentX, y, contentW, lineH),
+                            new GUIContent("Name"), s.SelectedTask.name ?? "");
+                        if (EditorGUI.EndChangeCheck())
+                        {
+                            Undo.RegisterCompleteObjectUndo(targetObj, "Rename");
+                            s.SelectedTask.name = newName;
+                            MarkDirty(targetObj);
+                        }
+                        y += lineH + 2;
+                    }
+
+                    // -- Task Type popup (non-root) --
+                    if (isNonRoot && selParent != null && selChildIdx >= 0)
+                    {
+                        y = DrawTaskTypeForChild(s, selParent, selChildIdx, taskTree, targetObj, contentX, y, contentW);
+                    }
+
+                    // -- Task-specific fields (only if task != null) --
+                    if (hasSelection && s.SelectedTask != null)
+                    {
+                        string nodePath = FindNodePropertyPath(property, s.SelectedTask);
+                        if (nodePath != null)
+                        {
+                            var so = property.serializedObject;
+                            so.Update();
+                            var nodeProp = so.FindProperty(nodePath);
+                            if (nodeProp != null)
+                            {
+                                // Draw remaining task properties (skip name, children — already handled above)
+                                var iter = nodeProp.Copy();
+                                var endProp = nodeProp.GetEndProperty();
+                                bool enterChildren = true;
+                                while (iter.NextVisible(enterChildren) && !SerializedProperty.EqualContents(iter, endProp))
+                                {
+                                    enterChildren = false;
+                                    if (iter.name == "name" || iter.name == "children") continue;
+                                    float propH = EditorGUI.GetPropertyHeight(iter, true);
+                                    EditorGUI.PropertyField(new Rect(contentX, y, contentW, propH), iter, true);
+                                    y += propH + 2;
+                                }
+                                if (so.ApplyModifiedProperties())
+                                    MarkDirty(targetObj);
+                            }
+                        }
+
+                        // Runtime inspector (Play Mode)
+                        if (Application.isPlaying)
+                            y = DrawRuntimeInspector(s.SelectedTask, contentX, y, contentW);
+
+                        // Add child button for CompositeTask
+                        if (s.SelectedTask is Runtime.CompositeTask comp)
+                        {
+                            y += 4;
+                            var addBtnRect = new Rect(contentX, y, contentW, lineH);
+                            if (GUI.Button(addBtnRect, "+ Add Child"))
+                                ShowAddChildPopup(s, addBtnRect, comp, taskTree, targetObj);
+                            y += lineH + 2;
+                        }
                     }
                 }
             }
@@ -600,8 +732,7 @@ namespace Hlight.Structures.CompositeTask.Editor
                 if (HitTestNode(s, taskTree.root, local) == null)
                 {
                     CommitRename(s, taskTree, targetObj);
-                    s.selected = null;
-                    s.multiSelected.Clear();
+                    SelectSingle(s, -1);
                     ClearTextFieldFocus();
                     HandleUtility.Repaint();
                 }
@@ -614,13 +745,13 @@ namespace Hlight.Structures.CompositeTask.Editor
 
         static float GetTreeContentHeight(DrawerState s, ATask node)
         {
-            if (node == null) return RowHeight;
+            if (node == null) return RowHeight; // null task = 1 empty row
             if (!IsVisibleBySearch(s, node)) return 0;
             float h = RowHeight;
             if (node is Runtime.CompositeTask comp && IsExpanded(s, comp) && comp.children != null)
                 foreach (var ch in comp.children)
-                    if (ch?.task != null)
-                        h += GetTreeContentHeight(s, ch.task);
+                    if (ch != null)
+                        h += ch.task != null ? GetTreeContentHeight(s, ch.task) : RowHeight;
             return h;
         }
 
@@ -633,7 +764,8 @@ namespace Hlight.Structures.CompositeTask.Editor
             var e       = Event.current;
             var rowRect = new Rect(0, y, width, RowHeight);
             float indent = RowPadLeft + depth * IndentStep;
-            bool isSelected = s.multiSelected.Contains(node);
+            int navIdx  = FindNavIndexForTask(s, node);
+            bool isSelected = navIdx >= 0 && s.IsNavSelected(navIdx);
             bool isEnabled  = IsNodeEnabled(s, node);
             bool isRoot     = taskTree.root == node;
 
@@ -727,7 +859,7 @@ namespace Hlight.Structures.CompositeTask.Editor
                 {
                     if (s.renamingNode != node) CommitRename(s, taskTree, targetObj);
 
-                    if (e.clickCount == 2 && node == s.selected)
+                    if (e.clickCount == 2 && node == s.SelectedTask)
                     {
                         StartRename(s, node);
                         e.Use();
@@ -739,45 +871,32 @@ namespace Hlight.Structures.CompositeTask.Editor
 
                         if (ctrl)
                         {
-                            if (s.multiSelected.Contains(node))
+                            if (navIdx >= 0 && s.IsNavSelected(navIdx))
                             {
-                                s.multiSelected.Remove(node);
-                                s.selected = s.multiSelected.Count > 0 ? FirstOf(s.multiSelected) : null;
+                                s.selectedNavIndices.Remove(navIdx);
+                                // Update primary to first remaining, or -1
+                                s.primaryNavIndex = s.selectedNavIndices.Count > 0
+                                    ? s.selectedNavIndices.First() : -1;
                             }
-                            else
+                            else if (navIdx >= 0)
                             {
-                                s.multiSelected.Add(node);
-                                s.selected = node;
+                                s.selectedNavIndices.Add(navIdx);
+                                s.primaryNavIndex = navIdx;
                             }
-                            s.lastClicked = node;
+                            s.anchorNavIndex = navIdx;
                         }
-                        else if (shift && s.lastClicked != null)
+                        else if (shift && s.anchorNavIndex >= 0 && navIdx >= 0)
                         {
-                            var visible = new List<ATask>();
-                            BuildVisibleList(s, taskTree.root, visible);
-                            int a = visible.IndexOf(s.lastClicked);
-                            int b = visible.IndexOf(node);
-                            if (a >= 0 && b >= 0)
-                            {
-                                int from = Mathf.Min(a, b);
-                                int to   = Mathf.Max(a, b);
-                                s.multiSelected.Clear();
-                                for (int vi = from; vi <= to; vi++)
-                                    s.multiSelected.Add(visible[vi]);
-                                s.selected = node;
-                            }
+                            SelectRange(s, navIdx);
                         }
-                        else if (s.multiSelected.Contains(node))
+                        else if (navIdx >= 0 && s.IsNavSelected(navIdx))
                         {
-                            s.selected    = node;
-                            s.lastClicked = node;
+                            s.primaryNavIndex = navIdx;
+                            s.anchorNavIndex = navIdx;
                         }
-                        else
+                        else if (navIdx >= 0)
                         {
-                            s.multiSelected.Clear();
-                            s.multiSelected.Add(node);
-                            s.selected    = node;
-                            s.lastClicked = node;
+                            SelectSingle(s, navIdx);
                         }
 
                         ClearTextFieldFocus();
@@ -789,12 +908,8 @@ namespace Hlight.Structures.CompositeTask.Editor
                 }
                 else if (e.button == 1)
                 {
-                    if (!s.multiSelected.Contains(node))
-                    {
-                        s.multiSelected.Clear();
-                        s.multiSelected.Add(node);
-                        s.selected = node;
-                    }
+                    if (navIdx >= 0 && !s.IsNavSelected(navIdx))
+                        SelectSingle(s, navIdx);
                 }
             }
 
@@ -805,10 +920,71 @@ namespace Hlight.Structures.CompositeTask.Editor
                 for (int i = 0; i < composite.children.Count; i++)
                 {
                     var child = composite.children[i];
-                    if (child?.task != null)
+                    if (child == null) continue;
+                    if (child.task != null)
                         DrawNodeRow(s, child.task, composite, i, depth + 1, ref y, width,
                                     taskTree, targetObj, property);
+                    else
+                        DrawEmptyChildRow(s, composite, i, depth + 1, ref y, width, taskTree, targetObj);
                 }
+        }
+
+        /// <summary>
+        /// Vẽ row cho child có task == null. Hiển thị đỏ "(empty)".
+        /// Click để select → user chọn type từ Task Type dropdown trong inspector.
+        /// </summary>
+        static void DrawEmptyChildRow(DrawerState s, Runtime.CompositeTask parent, int indexInParent,
+                                       int depth, ref float y, float width, TaskTree taskTree,
+                                       UnityEngine.Object targetObj)
+        {
+            var e = Event.current;
+            var rowRect = new Rect(0, y, width, RowHeight);
+            float indent = RowPadLeft + depth * IndentStep + FoldoutW;
+            int emptyNavIdx = FindNavIndexForEmpty(s, parent, indexInParent);
+            bool isSelected = emptyNavIdx >= 0 && s.IsNavSelected(emptyNavIdx);
+
+            // Background
+            if (isSelected)
+                EditorGUI.DrawRect(rowRect, SelectionHighlight);
+            else if (rowRect.Contains(e.mousePosition) && e.type == EventType.Repaint)
+                EditorGUI.DrawRect(rowRect, HoverHighlight);
+
+            // Badge + name
+            if (e.type == EventType.Repaint)
+            {
+                GUI.Label(new Rect(indent, y, BadgeW, RowHeight), "[---]", s.dimLabelStyle);
+                s.nodeNameStyle.normal.textColor = ErrorTextColor;
+                GUI.Label(new Rect(indent + BadgeW + BadgePadding, y, width - indent - BadgeW - 8, RowHeight),
+                    "(empty)", s.nodeNameStyle);
+            }
+
+            // Click → select empty child
+            if (e.type == EventType.MouseDown && e.button == 0 && rowRect.Contains(e.mousePosition))
+            {
+                if (emptyNavIdx >= 0)
+                    SelectSingle(s, emptyNavIdx);
+                ClearTextFieldFocus();
+                e.Use();
+            }
+
+            // Right-click → delete
+            if (e.type == EventType.MouseDown && e.button == 1 && rowRect.Contains(e.mousePosition))
+            {
+                var menu = new GenericMenu();
+                var capturedParent = parent;
+                var capturedIdx = indexInParent;
+                var capturedTarget = targetObj;
+                menu.AddItem(new GUIContent("Delete"), false, () =>
+                {
+                    Undo.RegisterCompleteObjectUndo(capturedTarget, "Delete Empty Child");
+                    capturedParent.children.RemoveAt(capturedIdx);
+                    MarkDirty(capturedTarget);
+                });
+                menu.ShowAsContext();
+                e.Use();
+            }
+
+            y += RowHeight;
         }
 
         #endregion
@@ -966,8 +1142,10 @@ namespace Hlight.Structures.CompositeTask.Editor
         {
             if (s.dropParentTarget == null || s.draggedNode == null) return;
 
-            var nodesToMove = s.multiSelected.Contains(s.draggedNode)
-                ? new List<ATask>(s.multiSelected)
+            int dragNavIdx = FindNavIndexForTask(s, s.draggedNode);
+            var selectedTasks = GetSelectedTasks(s);
+            var nodesToMove = (dragNavIdx >= 0 && s.IsNavSelected(dragNavIdx))
+                ? new List<ATask>(selectedTasks)
                 : new List<ATask> { s.draggedNode };
 
             nodesToMove.RemoveAll(n => n == null || n == taskTree.root || IsAncestorOrSelf(n, s.dropParentTarget));
@@ -1082,7 +1260,7 @@ namespace Hlight.Structures.CompositeTask.Editor
                              UnityEngine.Object targetObj, SerializedProperty property)
         {
             var menu = new GenericMenu();
-            var target = hitNode ?? s.selected;
+            var target = hitNode ?? s.SelectedTask;
 
             if (target is Runtime.CompositeTask comp)
             {
@@ -1119,7 +1297,7 @@ namespace Hlight.Structures.CompositeTask.Editor
             if (target != null)
             {
                 bool isRoot = target == taskTree.root;
-                int multiCount = s.multiSelected.Count;
+                int multiCount = s.selectedNavIndices.Count;
                 bool isMulti = multiCount > 1;
 
                 if (!isMulti)
@@ -1137,7 +1315,7 @@ namespace Hlight.Structures.CompositeTask.Editor
 
                 if (isMulti)
                     menu.AddItem(new GUIContent($"Copy {multiCount} nodes  Ctrl+C"), false,
-                        () => { s.clipboard = new List<ATask>(s.multiSelected); });
+                        () => { s.clipboard = GetSelectedTasks(s); });
                 else
                     menu.AddItem(new GUIContent("Copy          Ctrl+C"), false,
                         () => { s.clipboard = new List<ATask> { target }; });
@@ -1189,41 +1367,63 @@ namespace Hlight.Structures.CompositeTask.Editor
             if (EditorGUIUtility.editingTextField) return;
 
             bool ctrl = e.control || e.command;
-            if (s.selected == null) { s.selected = taskTree.root; return; }
 
-            var visible = new List<ATask>();
-            BuildVisibleList(s, taskTree.root, visible);
-            int cur = visible.IndexOf(s.selected);
+            // Delete empty child — handle before null-selected guard
+            if (e.keyCode == KeyCode.Delete && s.PrimaryEntry?.IsEmpty == true)
+            {
+                var entry = s.PrimaryEntry.Value;
+                var ep = entry.parent;
+                int ei = entry.childIndex;
+                if (ep != null && ei >= 0 && ei < ep.children.Count)
+                {
+                    Undo.RegisterCompleteObjectUndo(targetObj, "Delete Empty Child");
+                    ep.children.RemoveAt(ei);
+                    MarkDirty(targetObj);
+                }
+                SelectSingle(s, -1);
+                e.Use(); return;
+            }
+
+            // Use navList (already rebuilt in OnGUI)
+            int cur = s.primaryNavIndex;
+
+            // No selection → select root
+            if (cur < 0 && s.SelectedTask == null && !(s.PrimaryEntry?.IsEmpty == true))
+            {
+                int rootIdx = FindNavIndexForTask(s, taskTree.root);
+                if (rootIdx >= 0) SelectSingle(s, rootIdx);
+                return;
+            }
 
             if (e.keyCode == KeyCode.Delete)
             {
-                if (s.multiSelected.Count > 1)
+                if (s.selectedNavIndices.Count > 1)
                     DeleteMultipleNodes(s, taskTree, targetObj);
                 else
-                    DeleteNode(s, s.selected, taskTree, targetObj);
+                    DeleteNode(s, s.SelectedTask, taskTree, targetObj);
                 e.Use(); return;
             }
 
-            if (ctrl && e.keyCode == KeyCode.D)
+            if (ctrl && e.keyCode == KeyCode.D && s.SelectedTask != null)
             {
-                if (s.multiSelected.Count > 1)
+                if (s.selectedNavIndices.Count > 1)
                     DuplicateMultipleNodes(s, taskTree, targetObj);
                 else
-                    DuplicateNode(s, s.selected, taskTree, targetObj);
+                    DuplicateNode(s, s.SelectedTask, taskTree, targetObj);
                 e.Use(); return;
             }
-            if (ctrl && e.keyCode == KeyCode.C)
+            if (ctrl && e.keyCode == KeyCode.C && s.SelectedTask != null)
             {
-                s.clipboard = new List<ATask>(s.multiSelected);
-                if (s.clipboard.Count == 0 && s.selected != null)
-                    s.clipboard.Add(s.selected);
+                s.clipboard = GetSelectedTasks(s);
+                if (s.clipboard.Count == 0 && s.SelectedTask != null)
+                    s.clipboard.Add(s.SelectedTask);
                 e.Use(); return;
             }
-            if (ctrl && e.keyCode == KeyCode.V && s.selected is Runtime.CompositeTask cv)
+            if (ctrl && e.keyCode == KeyCode.V && s.SelectedTask is Runtime.CompositeTask cv)
             { PasteChildren(s, cv, taskTree, targetObj); e.Use(); return; }
 
-            if (e.keyCode == KeyCode.F2 && s.multiSelected.Count <= 1)
-            { StartRename(s, s.selected); e.Use(); return; }
+            if (e.keyCode == KeyCode.F2 && s.SelectedTask != null && s.selectedNavIndices.Count <= 1)
+            { StartRename(s, s.SelectedTask); e.Use(); return; }
 
             if (e.alt && e.keyCode == KeyCode.LeftArrow)
             { CollapseAll(s, taskTree.root); e.Use(); return; }
@@ -1234,70 +1434,177 @@ namespace Hlight.Structures.CompositeTask.Editor
             {
                 if (e.keyCode == KeyCode.UpArrow)
                 {
-                    if (cur > 0) s.selected = visible[cur - 1];
-                    s.multiSelected.Clear();
-                    if (s.selected != null) s.multiSelected.Add(s.selected);
-                    s.lastClicked = s.selected;
-                    ScrollToNode(s, taskTree, s.selected);
+                    if (cur > 0)
+                    {
+                        int newIdx = cur - 1;
+                        if (e.shift && s.anchorNavIndex >= 0)
+                        {
+                            SelectRange(s, newIdx);
+                            ScrollToNode(s, taskTree, s.SelectedTask);
+                        }
+                        else
+                            SelectNavEntry(s, newIdx, taskTree);
+                    }
                     e.Use(); return;
                 }
                 if (e.keyCode == KeyCode.DownArrow)
                 {
-                    if (cur < visible.Count - 1) s.selected = visible[cur + 1];
-                    s.multiSelected.Clear();
-                    if (s.selected != null) s.multiSelected.Add(s.selected);
-                    s.lastClicked = s.selected;
-                    ScrollToNode(s, taskTree, s.selected);
+                    if (cur < s.navList.Count - 1)
+                    {
+                        int newIdx = cur + 1;
+                        if (e.shift && s.anchorNavIndex >= 0)
+                        {
+                            SelectRange(s, newIdx);
+                            ScrollToNode(s, taskTree, s.SelectedTask);
+                        }
+                        else
+                            SelectNavEntry(s, newIdx, taskTree);
+                    }
                     e.Use(); return;
                 }
             }
 
-            if (e.keyCode == KeyCode.LeftArrow)
+            if (e.keyCode == KeyCode.LeftArrow && s.SelectedTask != null)
             {
-                if (s.selected is Runtime.CompositeTask comp && IsExpanded(s, comp))
+                if (s.SelectedTask is Runtime.CompositeTask comp && IsExpanded(s, comp))
                     SetExpanded(s, comp, false);
-                else { FindParent(taskTree.root, s.selected, out var p, out _); if (p != null) s.selected = p; }
-                s.multiSelected.Clear();
-                if (s.selected != null) s.multiSelected.Add(s.selected);
-                ScrollToNode(s, taskTree, s.selected);
+                else
+                {
+                    FindParent(taskTree.root, s.SelectedTask, out var p, out _);
+                    if (p != null)
+                    {
+                        int pIdx = FindNavIndexForTask(s, p);
+                        if (pIdx >= 0) SelectSingle(s, pIdx);
+                    }
+                }
+                ScrollToNode(s, taskTree, s.SelectedTask);
                 e.Use(); return;
             }
             if (e.keyCode == KeyCode.RightArrow)
             {
-                if (s.selected is Runtime.CompositeTask comp)
+                // Composite collapsed → expand
+                if (s.SelectedTask is Runtime.CompositeTask comp && !IsExpanded(s, comp))
                 {
-                    if (!IsExpanded(s, comp))
-                        SetExpanded(s, comp, true);
-                    else
+                    SetExpanded(s, comp, true);
+                }
+                // Otherwise → jump to next CompositeTask in nav list
+                else if (cur >= 0)
+                {
+                    for (int i = cur + 1; i < s.navList.Count; i++)
                     {
-                        // Already expanded → jump to next sibling
-                        int nextIdx = visible.IndexOf(s.selected);
-                        if (nextIdx >= 0)
+                        if (s.navList[i].task is Runtime.CompositeTask)
                         {
-                            // Skip all descendants to find next sibling
-                            int skip = nextIdx + 1;
-                            while (skip < visible.Count && IsDescendant(comp, visible[skip]))
-                                skip++;
-                            if (skip < visible.Count)
-                                s.selected = visible[skip];
+                            SelectNavEntry(s, i, taskTree);
+                            break;
                         }
                     }
                 }
-                s.multiSelected.Clear();
-                if (s.selected != null) s.multiSelected.Add(s.selected);
-                ScrollToNode(s, taskTree, s.selected);
+                ScrollToNode(s, taskTree, s.SelectedTask);
                 e.Use();
             }
         }
 
-        static void BuildVisibleList(DrawerState s, ATask node, List<ATask> list)
+        /// <summary>
+        /// Navigation entry — represents either a real task or an empty child slot.
+        /// </summary>
+        internal struct NavEntry
         {
-            if (node == null || !IsVisibleBySearch(s, node)) return;
-            list.Add(node);
-            if (node is Runtime.CompositeTask comp && IsExpanded(s, comp) && comp.children != null)
-                foreach (var ch in comp.children)
-                    if (ch?.task != null)
-                        BuildVisibleList(s, ch.task, list);
+            public ATask task;                      // null for empty child
+            public Runtime.CompositeTask parent;    // parent composite (null for root)
+            public int childIndex;                  // index in parent.children (-1 for root)
+
+            public bool IsEmpty => task == null;
+        }
+
+        internal static void BuildNavList(DrawerState s, ATask node, Runtime.CompositeTask parent, int childIdx, List<NavEntry> list)
+        {
+            if (node != null)
+            {
+                if (!IsVisibleBySearch(s, node)) return;
+                list.Add(new NavEntry { task = node, parent = parent, childIndex = childIdx });
+                if (node is Runtime.CompositeTask comp && IsExpanded(s, comp) && comp.children != null)
+                    for (int i = 0; i < comp.children.Count; i++)
+                    {
+                        var ch = comp.children[i];
+                        if (ch == null) continue;
+                        if (ch.task != null)
+                            BuildNavList(s, ch.task, comp, i, list);
+                        else
+                            list.Add(new NavEntry { task = null, parent = comp, childIndex = i });
+                    }
+            }
+            else
+            {
+                // empty child
+                list.Add(new NavEntry { task = null, parent = parent, childIndex = childIdx });
+            }
+        }
+
+        /// <summary>
+        /// Apply NavEntry as selection state (by nav index).
+        /// </summary>
+        static void SelectNavEntry(DrawerState s, int navIdx, TaskTree taskTree)
+        {
+            SelectSingle(s, navIdx);
+            ScrollToNode(s, taskTree, s.SelectedTask);
+        }
+
+        /// <summary>
+        /// Find navList index for a given task. Returns -1 if not found.
+        /// </summary>
+        internal static int FindNavIndexForTask(DrawerState s, ATask task)
+        {
+            for (int i = 0; i < s.navList.Count; i++)
+                if (s.navList[i].task == task) return i;
+            return -1;
+        }
+
+        /// <summary>
+        /// Find navList index for an empty child entry. Returns -1 if not found.
+        /// </summary>
+        internal static int FindNavIndexForEmpty(DrawerState s, Runtime.CompositeTask parent, int childIndex)
+        {
+            for (int i = 0; i < s.navList.Count; i++)
+                if (s.navList[i].IsEmpty && s.navList[i].parent == parent && s.navList[i].childIndex == childIndex)
+                    return i;
+            return -1;
+        }
+
+        /// <summary>
+        /// Select a single nav entry, setting primary, anchor, and clearing multi-selection.
+        /// </summary>
+        internal static void SelectSingle(DrawerState s, int navIdx)
+        {
+            s.primaryNavIndex = navIdx;
+            s.anchorNavIndex = navIdx;
+            s.selectedNavIndices.Clear();
+            if (navIdx >= 0)
+                s.selectedNavIndices.Add(navIdx);
+        }
+
+        /// <summary>
+        /// Select range from anchor to target (inclusive), for shift+click/shift+arrow.
+        /// </summary>
+        static void SelectRange(DrawerState s, int targetIdx)
+        {
+            s.primaryNavIndex = targetIdx;
+            s.selectedNavIndices.Clear();
+            int from = Mathf.Min(s.anchorNavIndex, targetIdx);
+            int to = Mathf.Max(s.anchorNavIndex, targetIdx);
+            for (int i = from; i <= to; i++)
+                s.selectedNavIndices.Add(i);
+        }
+
+        /// <summary>
+        /// Get selected tasks as a list (for multi-selection operations).
+        /// </summary>
+        static List<ATask> GetSelectedTasks(DrawerState s)
+        {
+            var result = new List<ATask>();
+            foreach (int idx in s.selectedNavIndices)
+                if (idx >= 0 && idx < s.navList.Count && s.navList[idx].task != null)
+                    result.Add(s.navList[idx].task);
+            return result;
         }
 
         #endregion
@@ -1362,9 +1669,7 @@ namespace Hlight.Structures.CompositeTask.Editor
             if (task is Runtime.CompositeTask comp) SetExpanded(s, comp, true);
             if (task != null)
             {
-                s.selected = task;
-                s.multiSelected.Clear();
-                s.multiSelected.Add(task);
+                s.pendingSelectTask = task;
                 s.needsScrollToSelection = true;
             }
             MarkDirty(targetObj);
@@ -1423,9 +1728,10 @@ namespace Hlight.Structures.CompositeTask.Editor
             if (parent == null) return;
             Undo.RegisterCompleteObjectUndo(targetObj, "Delete Node");
             parent.children.RemoveAt(idx);
-            s.multiSelected.Remove(node);
-            if (s.selected == node || (s.selected != null && IsDescendant(node, s.selected)))
-                s.selected = null;
+            int navIdx = FindNavIndexForTask(s, node);
+            if (navIdx >= 0) s.selectedNavIndices.Remove(navIdx);
+            if (s.SelectedTask == node || (s.SelectedTask != null && IsDescendant(node, s.SelectedTask)))
+                SelectSingle(s, -1);
             PurgeExpanded(s, taskTree);
             MarkDirty(targetObj);
         }
@@ -1435,58 +1741,70 @@ namespace Hlight.Structures.CompositeTask.Editor
             if (node == null || node == taskTree.root) return;
             FindParent(taskTree.root, node, out var parent, out int idx);
             if (parent == null) return;
-            var clone = DeepClone(node);
+            var clone = CloneTask(node);
             Undo.RegisterCompleteObjectUndo(targetObj, "Duplicate Node");
             parent.children.Insert(idx + 1, new Runtime.CompositeTask.Child
             { enabled = parent.children[idx].enabled, subTaskValue = parent.children[idx].subTaskValue,
               task = clone });
             clone.name = MakeUniqueSiblingName(parent, node.name);
-            s.multiSelected.Clear();
-            s.multiSelected.Add(clone);
-            s.selected = clone;
+            s.pendingSelectTask = clone;
             s.needsScrollToSelection = true;
             MarkDirty(targetObj);
         }
 
         static void DeleteMultipleNodes(DrawerState s, TaskTree taskTree, UnityEngine.Object targetObj)
         {
-            var toDelete = new List<ATask>(s.multiSelected);
+            var toDelete = GetSelectedTasks(s);
             toDelete.RemoveAll(n => n == null || n == taskTree.root);
             if (toDelete.Count == 0) return;
 
             Undo.RegisterCompleteObjectUndo(targetObj, "Delete Nodes");
+            // Resolve parent+index, sort descending to avoid shift corruption on RemoveAt
+            var entries = new List<(ATask node, Runtime.CompositeTask parent, int idx)>();
             foreach (var node in toDelete)
             {
                 FindParent(taskTree.root, node, out var parent, out int idx);
                 if (parent != null && idx >= 0 && idx < parent.children.Count)
-                    parent.children.RemoveAt(idx);
+                    entries.Add((node, parent, idx));
             }
-            s.selected = null;
-            s.multiSelected.Clear();
+            entries.Sort((a, b) => b.idx.CompareTo(a.idx));
+            foreach (var (_, parent, idx) in entries)
+                parent.children.RemoveAt(idx);
+            SelectSingle(s, -1);
             PurgeExpanded(s, taskTree);
             MarkDirty(targetObj);
         }
 
         static void DuplicateMultipleNodes(DrawerState s, TaskTree taskTree, UnityEngine.Object targetObj)
         {
-            var toDuplicate = new List<ATask>(s.multiSelected);
+            var toDuplicate = GetSelectedTasks(s);
             toDuplicate.RemoveAll(n => n == null || n == taskTree.root);
             if (toDuplicate.Count == 0) return;
 
             Undo.RegisterCompleteObjectUndo(targetObj, "Duplicate Nodes");
-            s.multiSelected.Clear();
+
+            // Resolve parent+index for each node, sort by descending index to avoid shift corruption
+            var entries = new List<(ATask node, Runtime.CompositeTask parent, int idx)>();
             foreach (var node in toDuplicate)
             {
                 FindParent(taskTree.root, node, out var parent, out int idx);
-                if (parent == null) continue;
-                var clone = DeepClone(node);
+                if (parent != null) entries.Add((node, parent, idx));
+            }
+            entries.Sort((a, b) => b.idx.CompareTo(a.idx));
+
+            var clonedTasks = new List<ATask>();
+            foreach (var (node, parent, idx) in entries)
+            {
+                var clone = CloneTask(node);
                 clone.name = MakeUniqueSiblingName(parent, node.name);
                 parent.children.Insert(idx + 1, new Runtime.CompositeTask.Child
                 { enabled = parent.children[idx].enabled, subTaskValue = parent.children[idx].subTaskValue,
                   task = clone });
-                s.multiSelected.Add(clone);
+                clonedTasks.Add(clone);
             }
-            s.selected = s.multiSelected.Count > 0 ? FirstOf(s.multiSelected) : null;
+            // Defer selection: set first clone as pending, rest will be handled after navList rebuild
+            if (clonedTasks.Count > 0)
+                s.pendingSelectTask = clonedTasks[0];
             MarkDirty(targetObj);
         }
 
@@ -1496,16 +1814,16 @@ namespace Hlight.Structures.CompositeTask.Editor
             Undo.RegisterCompleteObjectUndo(targetObj, "Paste Nodes");
             if (parent.children == null) parent.children = new List<Runtime.CompositeTask.Child>();
 
-            s.multiSelected.Clear();
+            ATask firstClone = null;
             foreach (var src in s.clipboard)
             {
-                var clone = DeepClone(src);
+                var clone = CloneTask(src);
                 clone.name = MakeUniqueSiblingName(parent, src.name);
                 parent.children.Add(new Runtime.CompositeTask.Child { enabled = true, subTaskValue = 0, task = clone });
-                s.multiSelected.Add(clone);
+                firstClone ??= clone;
             }
             SetExpanded(s, parent, true);
-            s.selected = s.multiSelected.Count > 0 ? FirstOf(s.multiSelected) : null;
+            s.pendingSelectTask = firstClone;
             s.needsScrollToSelection = true;
             MarkDirty(targetObj);
         }
@@ -1540,91 +1858,19 @@ namespace Hlight.Structures.CompositeTask.Editor
 
         #region Inspector
 
-        /// <summary>
-        /// Draw all properties of the node using rect-based EditorGUI.
-        /// Order: [Enabled + Name] -> SubTaskValue -> remaining fields -> Task type popup (non-composite).
-        /// </summary>
-        static float DrawNodeProperties(DrawerState s, SerializedObject so, SerializedProperty nodeProp,
-                                 string nodePath, ATask node, TaskTree taskTree,
-                                 UnityEngine.Object targetObj, float x, float y, float w)
-        {
-            float lineH = EditorGUIUtility.singleLineHeight;
-            bool isNonRoot = node != taskTree.root && nodePath != null && nodePath.EndsWith(".task");
-            string childWrapperPath = isNonRoot ? nodePath[..^".task".Length] : null;
-
-            // -- Row 1: [Enabled toggle] [Name field] --
-            if (isNonRoot)
-            {
-                var enabledProp = so.FindProperty(childWrapperPath + ".enabled");
-                float toggleW = 18f;
-                if (enabledProp != null)
-                    EditorGUI.PropertyField(new Rect(x, y, toggleW, lineH), enabledProp, GUIContent.none);
-
-                var nameProp = nodeProp.FindPropertyRelative("name");
-                if (nameProp != null)
-                    EditorGUI.PropertyField(new Rect(x + toggleW + 2, y, w - toggleW - 2, lineH), nameProp, GUIContent.none);
-                y += lineH + 2;
-            }
-            else
-            {
-                // Root: name only
-                var nameProp = nodeProp.FindPropertyRelative("name");
-                if (nameProp != null)
-                {
-                    EditorGUI.PropertyField(new Rect(x, y, w, lineH), nameProp, new GUIContent("Name"));
-                    y += lineH + 2;
-                }
-            }
-
-            // -- Row 2: Task Type popup (non-root only) --
-            if (isNonRoot)
-                y = DrawTaskTypeSection(s, so, nodeProp, node, taskTree, targetObj, x, y, w);
-
-            // -- Row 3: SubTaskValue (non-root only) --
-            if (isNonRoot)
-            {
-                var svProp = so.FindProperty(childWrapperPath + ".subTaskValue");
-                if (svProp != null)
-                {
-                    EditorGUI.PropertyField(new Rect(x, y, w, lineH), svProp, new GUIContent("Sub Task Value"));
-                    y += lineH + 2;
-                }
-            }
-
-            // -- Remaining properties (skip name, children) --
-            var iter = nodeProp.Copy();
-            var endProp = nodeProp.GetEndProperty();
-            bool enterChildren = true;
-            while (iter.NextVisible(enterChildren) && !SerializedProperty.EqualContents(iter, endProp))
-            {
-                enterChildren = false;
-                if (iter.name == "name" || iter.name == "children") continue;
-
-                float propH = EditorGUI.GetPropertyHeight(iter, true);
-                EditorGUI.PropertyField(new Rect(x, y, w, propH), iter, true);
-                y += propH + 2;
-            }
-
-            return y;
-        }
-
         // Special indices in the unified type popup
-        internal const int TypeIdx_None = 0;
-        internal const int TypeIdx_CompositeSeq = 1;
-        internal const int TypeIdx_CompositePar = 2;
-        internal const int TypeIdx_FirstDefineTask = 3;
-
-        /// <summary>
-        /// Draw unified Task type section: includes Composite options + [DefineTask] registry.
-        /// Shows for ALL tasks (concrete and CompositeTask alike).
+            /// <summary>
+        /// Unified Task Type dropdown hoạt động trên child entry (parent + index).
+        /// Hỗ trợ cả task != null và task == null.
         /// </summary>
-        static float DrawTaskTypeSection(DrawerState s, SerializedObject so, SerializedProperty nodeProp,
-                                          ATask node, TaskTree taskTree, UnityEngine.Object targetObj,
-                                          float x, float y, float w)
+        internal static float DrawTaskTypeForChild(DrawerState s, Runtime.CompositeTask parent, int childIdx,
+                                           TaskTree taskTree, UnityEngine.Object targetObj,
+                                           float x, float y, float w)
         {
+            if (childIdx < 0 || childIdx >= parent.children.Count) return y;
             float lineH = EditorGUIUtility.singleLineHeight;
+            var node = parent.children[childIdx].task;
 
-            // Build unified options list
             var concreteTypes = new List<Type>();
             var options = new List<string> { "None", "Composite (Sequential)", "Composite (Parallel)" };
             foreach (var entry in s.RegistryEntries)
@@ -1633,7 +1879,6 @@ namespace Hlight.Structures.CompositeTask.Editor
                 options.Add(entry.DisplayName);
             }
 
-            // Determine current index
             int popupIdx = TypeIdx_None;
             if (node is Runtime.CompositeTask ct)
                 popupIdx = ct.executionMode == ExecutionMode.Sequential ? TypeIdx_CompositeSeq : TypeIdx_CompositePar;
@@ -1652,34 +1897,31 @@ namespace Hlight.Structures.CompositeTask.Editor
             if (EditorGUI.DropdownButton(btnRect, new GUIContent(currentLabel), FocusType.Passive))
             {
                 var capturedConcreteTypes = concreteTypes;
-                var capturedNode = node;
+                var capturedParent = parent;
+                var capturedChildIdx = childIdx;
                 var capturedTarget = targetObj;
-                var capturedSo = so;
-                var capturedTaskTree = taskTree;
                 var capturedState = s;
+                var capturedTaskTree = taskTree;
+                var capturedNode = node;
 
                 SearchablePopup.Show(btnRect, options.ToArray(), popupIdx, newIdx =>
                 {
                     Undo.RegisterCompleteObjectUndo(capturedTarget, "Change Task Type");
-
-                    FindParent(capturedTaskTree.root, capturedNode, out var parentComp, out int childIdx);
-                    bool isRoot = capturedNode == capturedTaskTree.root;
+                    if (capturedChildIdx >= capturedParent.children.Count) return;
 
                     if (newIdx == TypeIdx_None)
                     {
-                        if (isRoot) return; // can't null root
-                        if (parentComp != null && childIdx >= 0 && childIdx < parentComp.children.Count)
-                        {
-                            parentComp.children[childIdx].task = null;
-                            capturedState.selected = null;
-                        }
+                        capturedParent.children[capturedChildIdx].task = null;
+                        // Select the empty child entry (deferred — navList not yet rebuilt)
+                        capturedState.pendingSelectTask = null;
+                        capturedState.pendingSelectEmptyParent = capturedParent;
+                        capturedState.pendingSelectEmptyIndex = capturedChildIdx;
                     }
                     else if (newIdx == TypeIdx_CompositeSeq || newIdx == TypeIdx_CompositePar)
                     {
                         var mode = newIdx == TypeIdx_CompositeSeq ? ExecutionMode.Sequential : ExecutionMode.Parallel;
                         if (capturedNode is Runtime.CompositeTask existing)
                         {
-                            // Just change execution mode, preserve children
                             existing.executionMode = mode;
                         }
                         else
@@ -1691,13 +1933,8 @@ namespace Hlight.Structures.CompositeTask.Editor
                                 executionMode = mode,
                                 children = new List<Runtime.CompositeTask.Child>()
                             };
-                            if (isRoot)
-                                capturedTaskTree.root = comp;
-                            else if (parentComp != null && childIdx >= 0 && childIdx < parentComp.children.Count)
-                                parentComp.children[childIdx].task = comp;
-                            capturedState.selected = comp;
-                            capturedState.multiSelected.Clear();
-                            capturedState.multiSelected.Add(comp);
+                            capturedParent.children[capturedChildIdx].task = comp;
+                            capturedState.pendingSelectTask = comp;
                         }
                     }
                     else
@@ -1711,29 +1948,23 @@ namespace Hlight.Structures.CompositeTask.Editor
                                 newTask.name = capturedNode?.name ?? "New Task";
                                 if (capturedNode != null)
                                     newTask.targetProgressToComplete = capturedNode.targetProgressToComplete;
-                                if (isRoot)
-                                {
-                                    // Root must be CompositeTask, don't allow concrete
-                                    Debug.LogWarning("Root must be a Composite Task.");
-                                    return;
-                                }
-                                if (parentComp != null && childIdx >= 0 && childIdx < parentComp.children.Count)
-                                    parentComp.children[childIdx].task = newTask;
-                                capturedState.selected = newTask;
-                                capturedState.multiSelected.Clear();
-                                capturedState.multiSelected.Add(newTask);
+                                capturedParent.children[capturedChildIdx].task = newTask;
+                                capturedState.pendingSelectTask = newTask;
                             }
-                            catch (Exception ex) { Debug.LogError($"Failed to create {capturedConcreteTypes[typeIdx].Name}: {ex.Message}"); }
+                            catch (Exception ex) { Debug.LogError($"Failed: {ex.Message}"); }
                         }
                     }
                     MarkDirty(capturedTarget);
-                    capturedSo.Update();
                 });
             }
             y += lineH + 2;
-
             return y;
         }
+
+        internal const int TypeIdx_None = 0;
+        internal const int TypeIdx_CompositeSeq = 1;
+        internal const int TypeIdx_CompositePar = 2;
+        internal const int TypeIdx_FirstDefineTask = 3;
 
         /// <summary>
         /// Draw runtime controls: Status, Progress bar, ForceComplete/ForceImmediate/Reset.
@@ -1811,66 +2042,95 @@ namespace Hlight.Structures.CompositeTask.Editor
         //  DEEP CLONE
         // ══════════════════════════════════════════════════════════════════
 
-        #region DeepClone
+        #region Clone
 
-        static ATask DeepClone(ATask src)
+        /// <summary>
+        /// Clone task: MemberwiseClone + clone tất cả serialized collection fields
+        /// để tránh shared reference. UnityEngine.Object refs (Transform, GameObject...)
+        /// giữ nguyên vì chúng trỏ scene objects.
+        /// </summary>
+        static ATask CloneTask(ATask src)
         {
             if (src == null) return null;
 
-            if (src is Runtime.CompositeTask c)
+            var memberwiseClone = typeof(object).GetMethod("MemberwiseClone",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            var clone = (ATask)memberwiseClone.Invoke(src, null);
+
+            // Clone serialized collection fields (List<T>, T[]) để không share reference
+            CloneCollectionFields(clone);
+
+            // CompositeTask: clone children đệ quy
+            if (clone is Runtime.CompositeTask compClone && src is Runtime.CompositeTask compSrc)
             {
-                var clone = new Runtime.CompositeTask
-                { name = c.name, targetProgressToComplete = c.targetProgressToComplete,
-                  executionMode = c.executionMode, children = new List<Runtime.CompositeTask.Child>() };
-                if (c.children != null)
-                    foreach (var ch in c.children)
-                        if (ch?.task != null)
-                            clone.children.Add(new Runtime.CompositeTask.Child
-                            { enabled = ch.enabled, subTaskValue = ch.subTaskValue,
-                              task = DeepClone(ch.task) });
-                return clone;
+                if (compSrc.children != null)
+                {
+                    compClone.children = new List<Runtime.CompositeTask.Child>();
+                    foreach (var ch in compSrc.children)
+                    {
+                        if (ch == null) continue;
+                        compClone.children.Add(new Runtime.CompositeTask.Child
+                        {
+                            enabled = ch.enabled,
+                            subTaskValue = ch.subTaskValue,
+                            task = CloneTask(ch.task)
+                        });
+                    }
+                }
             }
 
-            // Clone concrete ATask subclass via reflection
-            {
-                var clone = (ATask)Activator.CreateInstance(src.GetType());
-                clone.name = src.name;
-                clone.targetProgressToComplete = src.targetProgressToComplete;
-                CopySerializedFields(src, clone);
-                return clone;
-            }
+            return clone;
         }
 
         /// <summary>
-        /// Copy all serialized fields (public, [SerializeField] private/protected) from src to dst.
-        /// Skips fields already copied (name, targetProgressToComplete) from ATask base.
+        /// Deep-clone tất cả serialized reference-type fields (trừ UnityEngine.Object).
+        /// MemberwiseClone + recursive clone internal fields.
         /// </summary>
-        static void CopySerializedFields(object src, object dst)
+        static void CloneCollectionFields(object obj)
         {
-            if (src == null || dst == null) return;
-            var type = src.GetType();
-            while (type != null && type != typeof(ATask))
+            CloneReferenceFields(obj, 0);
+        }
+
+        static void CloneReferenceFields(object obj, int depth)
+        {
+            if (obj == null || depth > 4) return;
+            var memberwiseClone = typeof(object).GetMethod("MemberwiseClone",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            var type = obj.GetType();
+            while (type != null && type != typeof(object))
             {
-                foreach (var f in type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+                foreach (var f in type.GetFields(BindingFlags.Public | BindingFlags.NonPublic
+                                                  | BindingFlags.Instance | BindingFlags.DeclaredOnly))
                 {
-                    // Skip non-serialized fields
-                    bool isSerialized = f.IsPublic ||
-                                        f.GetCustomAttribute<SerializeField>() != null ||
-                                        f.GetCustomAttribute<UnityEngine.SerializeReference>() != null;
+                    // Only clone serialized fields
+                    bool isSerialized = f.IsPublic || f.GetCustomAttribute<SerializeField>() != null;
                     if (!isSerialized) continue;
                     if (f.GetCustomAttribute<NonSerializedAttribute>() != null) continue;
 
-                    var v = f.GetValue(src);
-                    if (v == null) { f.SetValue(dst, null); continue; }
-                    if (f.FieldType.IsArray && v is Array arr) f.SetValue(dst, arr.Clone());
-                    else if (f.FieldType.IsGenericType && f.FieldType.GetGenericTypeDefinition() == typeof(List<>))
+                    // Skip value types, strings, UnityEngine.Object refs
+                    if (f.FieldType.IsValueType) continue;
+                    if (f.FieldType == typeof(string)) continue;
+                    if (typeof(UnityEngine.Object).IsAssignableFrom(f.FieldType)) continue;
+
+                    var val = f.GetValue(obj);
+                    if (val == null) continue;
+
+                    // Array → shallow clone
+                    if (val is Array arr)
                     {
-                        var lt = typeof(List<>).MakeGenericType(f.FieldType.GetGenericArguments());
-                        var nl = (System.Collections.IList)Activator.CreateInstance(lt);
-                        foreach (var item in (System.Collections.IEnumerable)v) nl.Add(item);
-                        f.SetValue(dst, nl);
+                        f.SetValue(obj, arr.Clone());
                     }
-                    else f.SetValue(dst, v);
+                    // List, Dictionary, etc. → MemberwiseClone + recurse on serialized fields only
+                    else
+                    {
+                        try
+                        {
+                            var cloned = memberwiseClone.Invoke(val, null);
+                            f.SetValue(obj, cloned);
+                            CloneReferenceFields(cloned, depth + 1);
+                        }
+                        catch { /* skip */ }
+                    }
                 }
                 type = type.BaseType;
             }
@@ -1884,11 +2144,50 @@ namespace Hlight.Structures.CompositeTask.Editor
 
         #region Helpers
 
+        /// <summary>
+        /// Get the actual managed TaskTree reference from the target object via reflection.
+        /// Using property.boxedValue returns a COPY — mutations on it are lost.
+        /// This method traverses the property path to return the live field reference.
+        /// </summary>
         static TaskTree GetTaskTreeFromProperty(SerializedProperty property)
         {
             try
             {
-                return property.boxedValue as TaskTree;
+                var target = property.serializedObject.targetObject;
+                if (target == null) return null;
+
+                object obj = target;
+                var path = property.propertyPath.Replace(".Array.data[", "[");
+                var parts = path.Split('.');
+
+                foreach (var part in parts)
+                {
+                    if (obj == null) return null;
+
+                    if (part.Contains("["))
+                    {
+                        var fieldName = part[..part.IndexOf('[')];
+                        var indexStr = part[(part.IndexOf('[') + 1)..part.IndexOf(']')];
+                        int index = int.Parse(indexStr);
+
+                        var field = GetFieldRecursive(obj.GetType(), fieldName);
+                        if (field == null) return null;
+                        obj = field.GetValue(obj);
+
+                        if (obj is System.Collections.IList list)
+                            obj = index < list.Count ? list[index] : null;
+                        else
+                            return null;
+                    }
+                    else
+                    {
+                        var field = GetFieldRecursive(obj.GetType(), part);
+                        if (field == null) return null;
+                        obj = field.GetValue(obj);
+                    }
+                }
+
+                return obj as TaskTree;
             }
             catch
             {
@@ -1896,9 +2195,15 @@ namespace Hlight.Structures.CompositeTask.Editor
             }
         }
 
-        static ATask FirstOf(HashSet<ATask> set)
+        static FieldInfo GetFieldRecursive(Type type, string fieldName)
         {
-            foreach (var n in set) return n;
+            while (type != null)
+            {
+                var field = type.GetField(fieldName,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (field != null) return field;
+                type = type.BaseType;
+            }
             return null;
         }
 
@@ -2079,39 +2384,27 @@ namespace Hlight.Structures.CompositeTask.Editor
 
         internal static void ScrollToNode(DrawerState s, TaskTree taskTree, ATask target)
         {
-            if (taskTree?.root == null || target == null) return;
             s.needsScrollToSelection = true;
         }
 
         static void ApplyScrollToSelection(DrawerState s, TaskTree taskTree)
         {
-            if (!s.needsScrollToSelection || s.selected == null) return;
+            if (!s.needsScrollToSelection) return;
             s.needsScrollToSelection = false;
+            if (taskTree?.root == null) return;
 
-            float nodeY = GetNodeY(s, taskTree.root, s.selected, 0);
-            if (nodeY < 0) return;
+            // Use primaryNavIndex directly (navList is already rebuilt)
+            int idx = s.primaryNavIndex;
+            if (idx < 0 || idx >= s.navList.Count) return;
 
+            // Y position = idx * RowHeight (all rows are same height)
+            float nodeY = idx * RowHeight;
             float viewH = s.hierarchyHeight;
+
             if (nodeY < s.hierarchyScroll.y)
                 s.hierarchyScroll.y = nodeY;
             else if (nodeY + RowHeight > s.hierarchyScroll.y + viewH)
                 s.hierarchyScroll.y = nodeY + RowHeight - viewH;
-        }
-
-        static float GetNodeY(DrawerState s, ATask node, ATask target, float y)
-        {
-            if (node == null || !IsVisibleBySearch(s, node)) return -1;
-            if (node == target) return y;
-            y += RowHeight;
-            if (node is Runtime.CompositeTask comp && IsExpanded(s, comp) && comp.children != null)
-                foreach (var ch in comp.children)
-                {
-                    if (ch?.task == null) continue;
-                    float r = GetNodeY(s, ch.task, target, y);
-                    if (r >= 0) return r;
-                    y += GetTreeContentHeight(s, ch.task);
-                }
-            return -1;
         }
 
         internal static void MarkDirty(UnityEngine.Object target)
@@ -2187,6 +2480,26 @@ namespace Hlight.Structures.CompositeTask.Editor
 
             TaskTreePropertyDrawer.RebuildEnabledCache(s, taskTree);
 
+            // Rebuild navList each frame
+            s.navList.Clear();
+            if (taskTree?.root != null)
+                TaskTreePropertyDrawer.BuildNavList(s, taskTree.root, null, -1, s.navList);
+
+            // Resolve deferred selection
+            if (s.pendingSelectTask != null)
+            {
+                int idx = TaskTreePropertyDrawer.FindNavIndexForTask(s, s.pendingSelectTask);
+                if (idx >= 0) TaskTreePropertyDrawer.SelectSingle(s, idx);
+                s.pendingSelectTask = null;
+            }
+            else if (s.pendingSelectEmptyParent != null && s.pendingSelectEmptyIndex >= 0)
+            {
+                int idx = TaskTreePropertyDrawer.FindNavIndexForEmpty(s, s.pendingSelectEmptyParent, s.pendingSelectEmptyIndex);
+                if (idx >= 0) TaskTreePropertyDrawer.SelectSingle(s, idx);
+                s.pendingSelectEmptyParent = null;
+                s.pendingSelectEmptyIndex = -1;
+            }
+
             // Main foldout
             this.Property.State.Expanded = Sirenix.Utilities.Editor.SirenixEditorGUI.Foldout(
                 this.Property.State.Expanded, label ?? new GUIContent("Task Tree"));
@@ -2259,7 +2572,8 @@ namespace Hlight.Structures.CompositeTask.Editor
             }
 
             // -- Inspector Foldout --
-            if (s.selected != null)
+            bool odinHasEmpty = s.PrimaryEntry?.IsEmpty == true;
+            if (s.SelectedTask != null || odinHasEmpty)
             {
                 TaskTreePropertyDrawer.SetFoldout(s, TaskTreePropertyDrawer.FoldoutInspector,
                     EditorGUILayout.Foldout(
@@ -2270,92 +2584,99 @@ namespace Hlight.Structures.CompositeTask.Editor
                 {
                     EditorGUI.indentLevel++;
 
-                    // -- Row 1: [Enabled toggle] [Name] (non-root) --
-                    bool isNonRoot = s.selected != taskTree.root;
-                    TaskTreePropertyDrawer.FindParent(taskTree.root, s.selected,
-                        out var parentComp, out int childIdx);
-
-                    if (isNonRoot && parentComp != null && childIdx >= 0 && childIdx < parentComp.children.Count)
+                    // Resolve child entry
+                    Runtime.CompositeTask selParent;
+                    int selChildIdx;
+                    if (s.SelectedTask != null)
+                        TaskTreePropertyDrawer.FindParent(taskTree.root, s.SelectedTask, out selParent, out selChildIdx);
+                    else
                     {
-                        var childData = parentComp.children[childIdx];
+                        var entry = s.PrimaryEntry.Value;
+                        selParent = entry.parent;
+                        selChildIdx = entry.childIndex;
+                    }
+
+                    bool isNonRoot = s.SelectedTask != null ? s.SelectedTask != taskTree.root : true;
+
+                    // -- Enabled + Name --
+                    if (isNonRoot && selParent != null && selChildIdx >= 0 && selChildIdx < selParent.children.Count)
+                    {
+                        var childData = selParent.children[selChildIdx];
                         EditorGUILayout.BeginHorizontal();
 
-                        // Enabled toggle
                         EditorGUI.BeginChangeCheck();
                         bool newEnabled = EditorGUILayout.Toggle(GUIContent.none, childData.enabled, GUILayout.Width(18));
                         if (EditorGUI.EndChangeCheck())
                         {
                             Undo.RegisterCompleteObjectUndo(targetObj, "Toggle Enabled");
-                            parentComp.children[childIdx].enabled = newEnabled;
+                            childData.enabled = newEnabled;
                             TaskTreePropertyDrawer.MarkDirty(targetObj);
                         }
 
                         // Name
+                        string curName = childData.task?.name ?? "";
                         EditorGUI.BeginChangeCheck();
-                        string newName = EditorGUILayout.TextField(s.selected.name ?? "");
+                        string newName = EditorGUILayout.TextField(curName);
                         if (EditorGUI.EndChangeCheck())
                         {
                             Undo.RegisterCompleteObjectUndo(targetObj, "Rename");
-                            s.selected.name = newName;
+                            if (childData.task != null) childData.task.name = newName;
                             TaskTreePropertyDrawer.MarkDirty(targetObj);
                         }
 
                         EditorGUILayout.EndHorizontal();
-                    }
-                    else
-                    {
-                        // Root: name only
-                        EditorGUI.BeginChangeCheck();
-                        string newName = EditorGUILayout.TextField("Name", s.selected.name ?? "");
-                        if (EditorGUI.EndChangeCheck())
-                        {
-                            Undo.RegisterCompleteObjectUndo(targetObj, "Rename");
-                            s.selected.name = newName;
-                            TaskTreePropertyDrawer.MarkDirty(targetObj);
-                        }
-                    }
 
-                    // -- Task type popup (non-root only) --
-                    if (isNonRoot)
-                        DrawTaskTypeOdin(s, this.Property, taskTree, s.selected, targetObj);
-
-                    // -- SubTaskValue (non-root) --
-                    if (isNonRoot && parentComp != null && childIdx >= 0 && childIdx < parentComp.children.Count)
-                    {
-                        var childData = parentComp.children[childIdx];
+                        // SubTaskValue (separate row)
                         EditorGUI.BeginChangeCheck();
                         float newSv = EditorGUILayout.FloatField("Sub Task Value", childData.subTaskValue);
                         if (EditorGUI.EndChangeCheck())
                         {
                             Undo.RegisterCompleteObjectUndo(targetObj, "Edit SubTaskValue");
-                            parentComp.children[childIdx].subTaskValue = Mathf.Max(0f, newSv);
+                            childData.subTaskValue = Mathf.Max(0f, newSv);
+                            TaskTreePropertyDrawer.MarkDirty(targetObj);
+                        }
+                    }
+                    else if (!isNonRoot && s.SelectedTask != null)
+                    {
+                        EditorGUI.BeginChangeCheck();
+                        string newName = EditorGUILayout.TextField("Name", s.SelectedTask.name ?? "");
+                        if (EditorGUI.EndChangeCheck())
+                        {
+                            Undo.RegisterCompleteObjectUndo(targetObj, "Rename");
+                            s.SelectedTask.name = newName;
                             TaskTreePropertyDrawer.MarkDirty(targetObj);
                         }
                     }
 
-                    // -- Remaining Odin properties (skip name, children) --
-                    var nodeProp = FindOdinProperty(this.Property, taskTree, s.selected);
-                    if (nodeProp != null)
+                    // -- Task Type (non-root) --
+                    if (isNonRoot && selParent != null && selChildIdx >= 0)
+                        DrawTaskTypeOdin(s, this.Property, selParent, selChildIdx, taskTree, targetObj);
+
+                    // -- Task-specific Odin properties --
+                    if (s.SelectedTask != null)
                     {
-                        for (int i = 0; i < nodeProp.Children.Count; i++)
+                        var nodeProp = FindOdinProperty(this.Property, taskTree, s.SelectedTask);
+                        if (nodeProp != null)
                         {
-                            var child = nodeProp.Children[i];
-                            if (child.Name == "name" || child.Name == "children")
-                                continue;
-                            child.Draw();
+                            for (int i = 0; i < nodeProp.Children.Count; i++)
+                            {
+                                var child = nodeProp.Children[i];
+                                if (child.Name == "name" || child.Name == "children") continue;
+                                child.Draw();
+                            }
                         }
                     }
 
                     EditorGUI.indentLevel--;
 
-                    // Runtime inspector (Play Mode)
-                    if (Application.isPlaying && s.selected != null)
+                    // Runtime inspector
+                    if (Application.isPlaying && s.SelectedTask != null)
                     {
                         GUILayout.Space(4);
                         EditorGUI.indentLevel++;
                         EditorGUILayout.LabelField("Runtime", EditorStyles.boldLabel);
 
-                        Color statusColor = s.selected.Status switch
+                        Color statusColor = s.SelectedTask.Status switch
                         {
                             TaskStatus.Running   => TaskTreePropertyDrawer.StatusRunning,
                             TaskStatus.Finishing => TaskTreePropertyDrawer.StatusRunning,
@@ -2365,26 +2686,26 @@ namespace Hlight.Structures.CompositeTask.Editor
                         };
                         var oldColor = GUI.contentColor;
                         GUI.contentColor = statusColor;
-                        EditorGUILayout.LabelField("Status", s.selected.Status.ToString());
+                        EditorGUILayout.LabelField("Status", s.SelectedTask.Status.ToString());
                         GUI.contentColor = oldColor;
 
                         var progRect = EditorGUI.IndentedRect(EditorGUILayout.GetControlRect(false, 16));
-                        EditorGUI.ProgressBar(progRect, s.selected.Progress,
-                            $"{s.selected.Progress * 100f:F1}%");
+                        EditorGUI.ProgressBar(progRect, s.SelectedTask.Progress,
+                            $"{s.SelectedTask.Progress * 100f:F1}%");
 
                         var btnRect2 = EditorGUI.IndentedRect(EditorGUILayout.GetControlRect());
                         float btnW = (btnRect2.width - 8) / 3f;
                         if (GUI.Button(new Rect(btnRect2.x, btnRect2.y, btnW, btnRect2.height), "ForceComplete"))
-                            s.selected.ForceComplete();
+                            s.SelectedTask.ForceComplete();
                         if (GUI.Button(new Rect(btnRect2.x + btnW + 4, btnRect2.y, btnW, btnRect2.height), "ForceImmediate"))
-                            s.selected.ForceComplete(true);
+                            s.SelectedTask.ForceComplete(true);
                         if (GUI.Button(new Rect(btnRect2.x + 2*(btnW+4), btnRect2.y, btnW, btnRect2.height), "Reset"))
-                            s.selected.Reset();
+                            s.SelectedTask.Reset();
                         EditorGUI.indentLevel--;
                     }
 
-                    // Add child button for CompositeTask
-                    if (s.selected is Runtime.CompositeTask comp)
+                    // Add child button
+                    if (s.SelectedTask is Runtime.CompositeTask comp)
                     {
                         GUILayout.Space(4);
                         var addRect = EditorGUI.IndentedRect(EditorGUILayout.GetControlRect());
@@ -2398,112 +2719,16 @@ namespace Hlight.Structures.CompositeTask.Editor
         }
 
         /// <summary>
-        /// Draw unified Task type section in Odin: includes Composite + [DefineTask] entries.
+        /// Draw Task Type dropdown in Odin layout — delegates to shared rect-based DrawTaskTypeForChild.
         /// </summary>
         void DrawTaskTypeOdin(TaskTreePropertyDrawer.DrawerState s,
                                Sirenix.OdinInspector.Editor.InspectorProperty taskTreeProp,
-                               TaskTree taskTree, ATask node, UnityEngine.Object targetObj)
+                               Runtime.CompositeTask parent, int childIdx,
+                               TaskTree taskTree, UnityEngine.Object targetObj)
         {
-            // Build unified options: None, Composite (Seq), Composite (Par), then [DefineTask] entries
-            var concreteTypes = new List<Type>();
-            var options = new List<string> { "None", "Composite (Sequential)", "Composite (Parallel)" };
-            foreach (var entry in s.RegistryEntries)
-            {
-                concreteTypes.Add(entry.Type);
-                options.Add(entry.DisplayName);
-            }
-
-            // Determine current index
-            int popupIdx = TaskTreePropertyDrawer.TypeIdx_None;
-            if (node is Runtime.CompositeTask ct)
-                popupIdx = ct.executionMode == ExecutionMode.Sequential
-                    ? TaskTreePropertyDrawer.TypeIdx_CompositeSeq
-                    : TaskTreePropertyDrawer.TypeIdx_CompositePar;
-            else if (node != null)
-            {
-                var curType = node.GetType();
-                for (int i = 0; i < concreteTypes.Count; i++)
-                    if (concreteTypes[i] == curType) { popupIdx = TaskTreePropertyDrawer.TypeIdx_FirstDefineTask + i; break; }
-            }
-
-            string currentLabel = popupIdx >= 0 && popupIdx < options.Count ? options[popupIdx] : "None";
-
-            var btnRect = EditorGUI.IndentedRect(EditorGUILayout.GetControlRect());
-            float labelW = EditorGUIUtility.labelWidth;
-            GUI.Label(new Rect(btnRect.x, btnRect.y, labelW, btnRect.height), "Task Type");
-            var dropRect = new Rect(btnRect.x + labelW, btnRect.y, btnRect.width - labelW, btnRect.height);
-            if (EditorGUI.DropdownButton(dropRect, new GUIContent(currentLabel), FocusType.Passive))
-            {
-                var capturedConcreteTypes = concreteTypes;
-                var capturedNode = node;
-                var capturedTarget = targetObj;
-                var capturedTaskTree = taskTree;
-                var capturedState = s;
-
-                SearchablePopup.Show(dropRect, options.ToArray(), popupIdx, newIdx =>
-                {
-                    Undo.RegisterCompleteObjectUndo(capturedTarget, "Change Task Type");
-
-                    TaskTreePropertyDrawer.FindParent(capturedTaskTree.root, capturedNode, out var parentComp, out int childIdx);
-                    bool isRoot = capturedNode == capturedTaskTree.root;
-
-                    if (newIdx == TaskTreePropertyDrawer.TypeIdx_None)
-                    {
-                        if (isRoot) return;
-                        if (parentComp != null && childIdx >= 0 && childIdx < parentComp.children.Count)
-                        {
-                            parentComp.children[childIdx].task = null;
-                            capturedState.selected = null;
-                        }
-                    }
-                    else if (newIdx == TaskTreePropertyDrawer.TypeIdx_CompositeSeq || newIdx == TaskTreePropertyDrawer.TypeIdx_CompositePar)
-                    {
-                        var mode = newIdx == TaskTreePropertyDrawer.TypeIdx_CompositeSeq ? ExecutionMode.Sequential : ExecutionMode.Parallel;
-                        if (capturedNode is Runtime.CompositeTask existing)
-                        {
-                            existing.executionMode = mode;
-                        }
-                        else
-                        {
-                            var comp = new Runtime.CompositeTask
-                            {
-                                name = capturedNode?.name ?? "New Composite",
-                                targetProgressToComplete = capturedNode?.targetProgressToComplete ?? 1f,
-                                executionMode = mode,
-                                children = new List<Runtime.CompositeTask.Child>()
-                            };
-                            if (isRoot) capturedTaskTree.root = comp;
-                            else if (parentComp != null && childIdx >= 0 && childIdx < parentComp.children.Count)
-                                parentComp.children[childIdx].task = comp;
-                            capturedState.selected = comp;
-                            capturedState.multiSelected.Clear();
-                            capturedState.multiSelected.Add(comp);
-                        }
-                    }
-                    else
-                    {
-                        int typeIdx = newIdx - TaskTreePropertyDrawer.TypeIdx_FirstDefineTask;
-                        if (typeIdx >= 0 && typeIdx < capturedConcreteTypes.Count)
-                        {
-                            try
-                            {
-                                if (isRoot) { Debug.LogWarning("Root must be a Composite Task."); return; }
-                                var newTask = (ATask)Activator.CreateInstance(capturedConcreteTypes[typeIdx]);
-                                newTask.name = capturedNode?.name ?? "New Task";
-                                if (capturedNode != null)
-                                    newTask.targetProgressToComplete = capturedNode.targetProgressToComplete;
-                                if (parentComp != null && childIdx >= 0 && childIdx < parentComp.children.Count)
-                                    parentComp.children[childIdx].task = newTask;
-                                capturedState.selected = newTask;
-                                capturedState.multiSelected.Clear();
-                                capturedState.multiSelected.Add(newTask);
-                            }
-                            catch (Exception ex) { Debug.LogError($"Failed to create {capturedConcreteTypes[typeIdx].Name}: {ex.Message}"); }
-                        }
-                    }
-                    TaskTreePropertyDrawer.MarkDirty(capturedTarget);
-                });
-            }
+            var rect = EditorGUI.IndentedRect(EditorGUILayout.GetControlRect());
+            TaskTreePropertyDrawer.DrawTaskTypeForChild(s, parent, childIdx, taskTree, targetObj,
+                rect.x, rect.y, rect.width);
         }
 
         /// <summary>
