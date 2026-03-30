@@ -4,7 +4,9 @@
     "references": [
         "Hlight.Structures.CompositeTask.Runtime"
     ],
-    "includePlatforms": [],
+    "includePlatforms": [
+        "Editor"
+    ],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
     "overrideReferences": false,
