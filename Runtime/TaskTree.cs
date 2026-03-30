@@ -29,6 +29,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
         
         public void Execute(CancellationToken cancellationToken)
         {
+            root.Awake();
             root.ExecuteAsync(cancellationToken).Forget();
         }
 

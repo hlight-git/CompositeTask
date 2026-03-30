@@ -46,16 +46,6 @@ namespace Hlight.Structures.CompositeTask.Runtime
             if (Status == TaskStatus.Completed) return;
 
             Status = TaskStatus.Running;
-
-            try
-            {
-                OnBeginExecute();
-            }
-            catch (Exception e)
-            {
-                Debug.LogException(e);
-            }
-
             taskRunningCts = new CancellationTokenSource();
             taskFinishCts = new CancellationTokenSource();
 
@@ -70,10 +60,10 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
             try
             {
-                await Try(RunTheTask(taskRunningCts.Token));
+                await Try(OnRunning(taskRunningCts.Token));
                 Status = TaskStatus.Finishing;
                 if (!taskFinishCts.IsCancellationRequested)
-                    await Try(FinishTheTask(taskFinishCts.Token));
+                    await Try(OnFinishing(taskFinishCts.Token));
                 OnCompleted();
             }
             finally
@@ -106,11 +96,9 @@ namespace Hlight.Structures.CompositeTask.Runtime
             taskFinishCts?.Cancel();
         }
 
-        protected internal virtual void OnBeginExecute() {}
+        protected abstract UniTask OnRunning(CancellationToken cancellationToken);
 
-        protected abstract UniTask RunTheTask(CancellationToken cancellationToken);
-
-        protected virtual UniTask FinishTheTask(CancellationToken cancellationToken)
+        protected virtual UniTask OnFinishing(CancellationToken cancellationToken)
         {
             return UniTask.CompletedTask;
         }
@@ -177,6 +165,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
             Reset();
         }
 
+        public virtual void Awake() {}
         public virtual void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor) {}
     }
 }

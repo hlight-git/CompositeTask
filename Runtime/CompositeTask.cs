@@ -29,15 +29,16 @@ namespace Hlight.Structures.CompositeTask.Runtime
                 child?.task?.Accept(dependencyInjectionVisitor);
         }
 
-        protected internal override void OnBeginExecute()
+        public override void Awake()
         {
+            base.Awake();
             if (children == null) return;
             foreach (var child in children)
                 if (child is { enabled: true })
-                    child.task?.OnBeginExecute();
+                    child.task?.Awake();
         }
 
-        protected override async UniTask RunTheTask(CancellationToken cancellationToken)
+        protected override async UniTask OnRunning(CancellationToken cancellationToken)
         {
             if (executionMode == ExecutionMode.Sequential)
             {
@@ -54,7 +55,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
             }
         }
 
-        protected override UniTask FinishTheTask(CancellationToken cancellationToken)
+        protected override UniTask OnFinishing(CancellationToken cancellationToken)
         {
             if (IsAllChildTasksCompleted()) return UniTask.CompletedTask;
             return UniTask.WaitUntil(IsAllChildTasksCompleted, cancellationToken: cancellationToken);
