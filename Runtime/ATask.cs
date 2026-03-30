@@ -6,46 +6,46 @@ using UnityEngine;
 namespace Hlight.Structures.CompositeTask.Runtime
 {
     [Serializable]
-    public abstract class ATaskNode : IDisposable
+    public abstract class ATask : IDisposable
     {
         public string name;
         [Range(0, 1)]
-        public float targetProgressToComplete = 1; 
-        
+        public float targetProgressToComplete = 1;
+
         private float progress;
-        
+
         protected CancellationTokenSource taskRunningCts;
         protected CancellationTokenSource taskFinishCts;
-        
+
         [Newtonsoft.Json.JsonIgnore]
-        public TaskNodeStatus Status { get; private set; }
-        
+        public TaskStatus Status { get; private set; }
+
         [Newtonsoft.Json.JsonIgnore]
         public virtual float Progress
         {
             get => progress;
-            protected set
+            set
             {
                 var clampedValue = Mathf.Clamp01(value);
                 var delta = clampedValue - progress;
                 progress = clampedValue;
                 ProgressChanged?.Invoke(this, delta);
 
-                if (Status != TaskNodeStatus.Running) return;
+                if (Status != TaskStatus.Running) return;
                 if (Mathf.Approximately(targetProgressToComplete, 1)) return;
                 if (Progress < targetProgressToComplete) return;
                 ForceComplete();
             }
         }
-        
-        public event Action<ATaskNode, float> ProgressChanged;
-        public event Action<ATaskNode> Completed;
-        
+
+        public event Action<ATask, float> ProgressChanged;
+        public event Action<ATask> Completed;
+
         public async UniTask ExecuteAsync(CancellationToken externalCancellationToken)
         {
-            if (Status == TaskNodeStatus.Completed) return;
+            if (Status == TaskStatus.Completed) return;
 
-            Status = TaskNodeStatus.Running;
+            Status = TaskStatus.Running;
 
             try
             {
@@ -71,7 +71,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
             try
             {
                 await Try(RunTheTask(taskRunningCts.Token));
-                Status = TaskNodeStatus.Finishing;
+                Status = TaskStatus.Finishing;
                 if (!taskFinishCts.IsCancellationRequested)
                     await Try(FinishTheTask(taskFinishCts.Token));
                 OnCompleted();
@@ -90,7 +90,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
 #endif
             }
         }
-        
+
 #if COMPOSITE_TASK_DEBUG && UNITY_EDITOR
         protected virtual UniTask TryWarningNotUseCancellationToken(bool isRunning)
         {
@@ -99,20 +99,29 @@ namespace Hlight.Structures.CompositeTask.Runtime
             return UniTask.CompletedTask;
         }
 #endif
-        
+
         protected virtual void CancelAllCancellationTokenSources()
         {
             taskRunningCts?.Cancel();
             taskFinishCts?.Cancel();
         }
 
+        protected internal virtual void OnBeginExecute() {}
+
+        protected abstract UniTask RunTheTask(CancellationToken cancellationToken);
+
+        protected virtual UniTask FinishTheTask(CancellationToken cancellationToken)
+        {
+            return UniTask.CompletedTask;
+        }
+
         protected virtual void OnCompleted()
         {
-            Status = TaskNodeStatus.Completed;
+            Status = TaskStatus.Completed;
             Progress = 1;
             Completed?.Invoke(this);
         }
-        
+
         private async UniTask Try(UniTask task)
         {
             try
@@ -123,7 +132,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
             catch (Exception ex)
             {
                 Debug.LogException(ex);
-                Status = TaskNodeStatus.Failed;
+                Status = TaskStatus.Failed;
             }
         }
 
@@ -143,21 +152,21 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
             ProgressChanged = null;
             Completed = null;
-            Status = TaskNodeStatus.Pending;
+            Status = TaskStatus.Pending;
         }
 
         public virtual void ForceComplete(bool immediate = false)
         {
             switch (Status)
             {
-                case TaskNodeStatus.Pending:
+                case TaskStatus.Pending:
                     OnCompleted();
                     return;
-                case TaskNodeStatus.Running:
+                case TaskStatus.Running:
                     taskRunningCts?.Cancel();
                     if (immediate) taskFinishCts?.Cancel();
                     return;
-                case TaskNodeStatus.Finishing:
+                case TaskStatus.Finishing:
                     taskFinishCts?.Cancel();
                     return;
             }
@@ -168,10 +177,6 @@ namespace Hlight.Structures.CompositeTask.Runtime
             Reset();
         }
 
-        public abstract void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor);
-
-        protected internal abstract void OnBeginExecute();
-        protected abstract UniTask RunTheTask(CancellationToken cancellationToken);
-        protected abstract UniTask FinishTheTask(CancellationToken cancellationToken);
+        public virtual void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor) {}
     }
 }

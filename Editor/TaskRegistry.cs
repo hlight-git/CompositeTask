@@ -5,10 +5,10 @@ using Hlight.Structures.CompositeTask.Runtime;
 namespace Hlight.Structures.CompositeTask.Editor
 {
     /// <summary>
-    /// Scans all assemblies for [TaskDefinition]-attributed ITaskDefinition types.
+    /// Scans all assemblies for [DefineTask]-attributed ATask subclasses.
     /// Cached on first access; call Refresh() after domain reload if needed.
     /// </summary>
-    public static class TaskDefinitionRegistry
+    public static class TaskRegistry
     {
         public struct Entry
         {
@@ -42,9 +42,10 @@ namespace Hlight.Structures.CompositeTask.Editor
                 foreach (var type in types)
                 {
                     if (type == null || type.IsAbstract || type.IsInterface) continue;
-                    if (!typeof(ITaskDefinition).IsAssignableFrom(type)) continue;
+                    if (!typeof(ATask).IsAssignableFrom(type)) continue;
+                    if (type == typeof(Runtime.CompositeTask)) continue;
 
-                    var attr = (TaskDefinitionAttribute)Attribute.GetCustomAttribute(type, typeof(TaskDefinitionAttribute));
+                    var attr = (DefineTaskAttribute)Attribute.GetCustomAttribute(type, typeof(DefineTaskAttribute));
                     if (attr == null) continue;
 
                     cachedEntries.Add(new Entry

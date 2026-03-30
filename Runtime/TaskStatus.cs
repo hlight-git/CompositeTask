@@ -1,6 +1,6 @@
 namespace Hlight.Structures.CompositeTask.Runtime
 {
-    public enum TaskNodeStatus
+    public enum TaskStatus
     {
         Pending,
         Running,

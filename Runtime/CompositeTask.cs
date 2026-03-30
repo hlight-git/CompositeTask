@@ -7,7 +7,7 @@ using UnityEngine;
 namespace Hlight.Structures.CompositeTask.Runtime
 {
     [Serializable]
-    public class CompositeTaskNode : ATaskNode
+    public class CompositeTask : ATask
     {
         [Serializable]
         public class Child
@@ -15,8 +15,9 @@ namespace Hlight.Structures.CompositeTask.Runtime
             public bool enabled = true;
             [Min(0)]
             public float subTaskValue;
-            [SerializeReference] public ATaskNode taskNode;
+            [SerializeReference] public ATask task;
         }
+
         [Newtonsoft.Json.JsonConverter(typeof(Newtonsoft.Json.Converters.StringEnumConverter))]
         [SerializeField] public ExecutionMode executionMode;
         [SerializeField] public List<Child> children;
@@ -25,14 +26,15 @@ namespace Hlight.Structures.CompositeTask.Runtime
         {
             if (children == null) return;
             foreach (var child in children)
-                child?.taskNode?.Accept(dependencyInjectionVisitor);
+                child?.task?.Accept(dependencyInjectionVisitor);
         }
-        
+
         protected internal override void OnBeginExecute()
         {
             if (children == null) return;
             foreach (var child in children)
-                child?.taskNode?.OnBeginExecute();
+                if (child is { enabled: true })
+                    child.task?.OnBeginExecute();
         }
 
         protected override async UniTask RunTheTask(CancellationToken cancellationToken)
@@ -41,50 +43,50 @@ namespace Hlight.Structures.CompositeTask.Runtime
             {
                 foreach (var child in children)
                     if (child.enabled)
-                        await ExecuteChildNode(child.taskNode, cancellationToken);
+                        await ExecuteChildTask(child.task, cancellationToken);
             }
             else
             {
                 foreach (var child in children)
                     if (child.enabled)
-                        ExecuteChildNode(child.taskNode, cancellationToken).Forget(Debug.LogError);
-                await UniTask.WaitUntil(IsAllChildNodesCompleted, cancellationToken: cancellationToken);
+                        ExecuteChildTask(child.task, cancellationToken).Forget(Debug.LogError);
+                await UniTask.WaitUntil(IsAllChildTasksCompleted, cancellationToken: cancellationToken);
             }
         }
 
         protected override UniTask FinishTheTask(CancellationToken cancellationToken)
         {
-            if (IsAllChildNodesCompleted()) return UniTask.CompletedTask;
-            return UniTask.WaitUntil(IsAllChildNodesCompleted, cancellationToken: cancellationToken);
+            if (IsAllChildTasksCompleted()) return UniTask.CompletedTask;
+            return UniTask.WaitUntil(IsAllChildTasksCompleted, cancellationToken: cancellationToken);
         }
 
-        private bool IsAllChildNodesCompleted()
+        private bool IsAllChildTasksCompleted()
         {
+            if (children == null) return true;
             foreach (var child in children)
             {
                 if (!child.enabled) continue;
-                var status = child.taskNode.Status;
-                if (status != TaskNodeStatus.Completed && status != TaskNodeStatus.Failed) return false;
+                var status = child.task.Status;
+                if (status != TaskStatus.Completed && status != TaskStatus.Failed) return false;
             }
-
             return true;
         }
-        
-        private UniTask ExecuteChildNode(ATaskNode childTaskNode, CancellationToken cancellationToken)
+
+        private UniTask ExecuteChildTask(ATask childTask, CancellationToken cancellationToken)
         {
-            childTaskNode.ProgressChanged += OnChildProgressChanged;
-            childTaskNode.Completed += OnChildCompleted;
-            return childTaskNode.ExecuteAsync(cancellationToken);
+            childTask.ProgressChanged += OnChildProgressChanged;
+            childTask.Completed += OnChildCompleted;
+            return childTask.ExecuteAsync(cancellationToken);
         }
 
-        private void OnChildProgressChanged(ATaskNode childTaskNode, float delta)
+        private void OnChildProgressChanged(ATask childTask, float delta)
         {
             var sum = GetSubTaskValueSum();
             if (sum <= 0f) return;
-            var child = children.Find(c => c.taskNode == childTaskNode);
+            var child = children.Find(c => c.task == childTask);
             Progress += delta * child.subTaskValue / sum;
         }
-        
+
         private float GetSubTaskValueSum()
         {
             var result = 0f;
@@ -92,16 +94,16 @@ namespace Hlight.Structures.CompositeTask.Runtime
             return result;
         }
 
-        private void OnChildCompleted(ATaskNode childTaskNode)
+        private void OnChildCompleted(ATask childTask)
         {
-            childTaskNode.ProgressChanged -= OnChildProgressChanged;
-            childTaskNode.Completed -= OnChildCompleted;
+            childTask.ProgressChanged -= OnChildProgressChanged;
+            childTask.Completed -= OnChildCompleted;
         }
 
         public void InsertChild(int index, Child child)
         {
             children.Insert(index, child);
-            if (Status != TaskNodeStatus.Running) return;
+            if (Status != TaskStatus.Running) return;
 
             var subTaskValueSum = GetSubTaskValueSum();
             var oldSum = subTaskValueSum - child.subTaskValue;
@@ -111,7 +113,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
             }
 
             if (executionMode == ExecutionMode.Parallel && taskFinishCts != null)
-                ExecuteChildNode(child.taskNode, taskFinishCts.Token).Forget();
+                ExecuteChildTask(child.task, taskFinishCts.Token).Forget();
         }
     }
 }

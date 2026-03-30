@@ -14,11 +14,10 @@ namespace Hlight.Structures.CompositeTask.Editor
         {
             typeToName = new Dictionary<Type, string>
             {
-                {typeof(CompositeTaskNode), nameof(CompositeTaskNode)},
-                {typeof(MonoTaskNode), nameof(MonoTaskNode)},
+                { typeof(Runtime.CompositeTask), nameof(CompositeTask) },
             };
 
-            foreach (var entry in TaskDefinitionRegistry.Entries)
+            foreach (var entry in TaskRegistry.Entries)
             {
                 typeToName.TryAdd(entry.Type, entry.BindingName);
             }
@@ -34,14 +33,14 @@ namespace Hlight.Structures.CompositeTask.Editor
         {
             if (nameToType.TryGetValue(typeName, out var type))
                 return type;
-            throw new InvalidOperationException($"Unknown task type: '{typeName}'. Ensure it has a [TaskDefinition] attribute.");
+            throw new InvalidOperationException($"Unknown task type: '{typeName}'. Ensure it has a [DefineTask] attribute.");
         }
 
         public void BindToName(Type serializedType, out string assemblyName, out string typeName)
         {
             assemblyName = null;
             if (!typeToName.TryGetValue(serializedType, out typeName))
-                throw new InvalidOperationException($"Unknown type: '{serializedType.FullName}'. Ensure it has a [TaskDefinition] attribute.");
+                throw new InvalidOperationException($"Unknown type: '{serializedType.FullName}'. Ensure it has a [DefineTask] attribute.");
         }
     }
 }

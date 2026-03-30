@@ -10,24 +10,21 @@ namespace Hlight.Structures.CompositeTask.Runtime
     }
 
     /// <summary>
-    /// Marks an ITaskDefinition implementation for automatic discovery by the editor.
-    /// Replaces manual registration in TaskDefinitionDatabase.
+    /// Marks a concrete ATask subclass for automatic discovery by the editor.
+    /// Classes with this attribute appear in the task type dropdown.
     /// </summary>
     [AttributeUsage(AttributeTargets.Class, Inherited = false, AllowMultiple = false)]
-    public sealed class TaskDefinitionAttribute : Attribute
+    public sealed class DefineTaskAttribute : Attribute
     {
         public string DisplayName { get; }
         public string Description { get; set; } = "";
         public TypeSerializationBindingMode BindingMode { get; set; } = TypeSerializationBindingMode.ByDisplayName;
 
-        public TaskDefinitionAttribute(string displayName)
+        public DefineTaskAttribute(string displayName)
         {
             DisplayName = displayName;
         }
 
-        /// <summary>
-        /// Returns the serialization binding name based on the configured mode.
-        /// </summary>
         public string GetBindingName(Type type)
         {
             return BindingMode switch

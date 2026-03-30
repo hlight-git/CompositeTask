@@ -8,11 +8,11 @@ namespace Hlight.Structures.CompositeTask.Runtime
     [Serializable]
     public class TaskTree : IDisposable
     {
-        public CompositeTaskNode root = new()
+        public CompositeTask root = new()
         {
             name = "Root",
             executionMode = ExecutionMode.Sequential,
-            children = new List<CompositeTaskNode.Child>(),
+            children = new List<CompositeTask.Child>(),
         };
 
         public void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor)
@@ -23,8 +23,13 @@ namespace Hlight.Structures.CompositeTask.Runtime
         public CancellationTokenSource Execute()
         {
             var cancellationTokenSource = new CancellationTokenSource();
-            root.ExecuteAsync(cancellationTokenSource.Token).Forget();
+            Execute(cancellationTokenSource.Token);
             return cancellationTokenSource;
+        }
+        
+        public void Execute(CancellationToken cancellationToken)
+        {
+            root.ExecuteAsync(cancellationToken).Forget();
         }
 
         public void Dispose()
