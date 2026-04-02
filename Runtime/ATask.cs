@@ -166,6 +166,10 @@ namespace Hlight.Structures.CompositeTask.Runtime
         }
 
         public virtual void Awake() {}
-        public virtual void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor) {}
+
+        public virtual void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor)
+        {
+            dependencyInjectionVisitor.Visit(this);
+        }
     }
 }

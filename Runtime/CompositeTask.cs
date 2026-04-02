@@ -24,6 +24,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         public override void Accept(IDependencyInjectionVisitor dependencyInjectionVisitor)
         {
+            base.Accept(dependencyInjectionVisitor);
             if (children == null) return;
             foreach (var child in children)
                 child?.task?.Accept(dependencyInjectionVisitor);
