@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using UnityEngine;
 
 namespace Hlight.Structures.CompositeTask.Runtime
 {
@@ -30,7 +31,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
         public void Execute(CancellationToken cancellationToken)
         {
             root.Awake();
-            root.ExecuteAsync(cancellationToken).Forget();
+            root.ExecuteAsync(cancellationToken).Forget(Debug.LogError);
         }
 
         public void Dispose()
