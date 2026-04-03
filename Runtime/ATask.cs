@@ -60,9 +60,10 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
             try
             {
-                await Try(OnRunning(taskRunningCts.Token));
+                if (taskRunningCts is { IsCancellationRequested: false })
+                    await Try(OnRunning(taskRunningCts.Token));
                 Status = TaskStatus.Finishing;
-                if (!taskFinishCts.IsCancellationRequested)
+                if (taskFinishCts is { IsCancellationRequested: false })
                     await Try(OnFinishing(taskFinishCts.Token));
                 OnCompleted();
             }

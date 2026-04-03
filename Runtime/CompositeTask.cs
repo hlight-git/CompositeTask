@@ -62,6 +62,46 @@ namespace Hlight.Structures.CompositeTask.Runtime
             return UniTask.WaitUntil(IsAllChildTasksCompleted, cancellationToken: cancellationToken);
         }
 
+        public override void Reset()
+        {
+            if (children != null)
+            {
+                foreach (var child in children)
+                {
+                    try
+                    {
+                        child?.task?.Reset();
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogException(e);
+                    }
+                }
+            }
+            
+            base.Reset();
+        }
+
+        public override void Dispose()
+        {
+            if (children != null)
+            {
+                foreach (var child in children)
+                {
+                    try
+                    {
+                        child?.task?.Dispose();
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogException(e);
+                    }
+                }
+            }
+            
+            base.Dispose();
+        }
+
         private bool IsAllChildTasksCompleted()
         {
             if (children == null) return true;
@@ -78,7 +118,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
         {
             childTask.ProgressChanged += OnChildProgressChanged;
             childTask.Completed += OnChildCompleted;
-            return childTask.ExecuteAsync(cancellationToken);
+            return cancellationToken.IsCancellationRequested ? UniTask.CompletedTask : childTask.ExecuteAsync(cancellationToken);
         }
 
         private void OnChildProgressChanged(ATask childTask, float delta)
