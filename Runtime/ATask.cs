@@ -65,7 +65,8 @@ namespace Hlight.Structures.CompositeTask.Runtime
                 Status = TaskStatus.Finishing;
                 if (taskFinishCts is { IsCancellationRequested: false })
                     await Try(OnFinishing(taskFinishCts.Token));
-                OnCompleted();
+                if (!externalCancellationToken.IsCancellationRequested && taskRunningCts != null && taskFinishCts != null)
+                    OnCompleted();
             }
             finally
             {
