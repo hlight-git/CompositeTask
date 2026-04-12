@@ -7,7 +7,7 @@ using UnityEngine.UI;
 
 namespace Hlight.Structures.CompositeTask.Runtime
 {
-    [DefineTaskNode("Tween Color", Category = "Tween", Description = "Tweens color on SpriteRenderers and/or Graphics. Ref: spriteRenderers[], graphics[]. Config: value (Color), isFrom (bool) — false=tween TO value, true=tween FROM value to current. duration, ease.")]
+    [DefineTaskNode("Tween Color", Category = "Tween", Description = "Tweens color on SpriteRenderers and/or Graphics. Ref: spriteRenderers[], graphics[]. Config: value (Color), isFrom (bool) — false=tween TO value, true=tween FROM value to current. duration, ease, speedBased.")]
     public class TweenColorNode : TaskNode<TweenColorNode.Settings>
     {
         [SerializeField] private SpriteRenderer[] spriteRenderers;
@@ -30,7 +30,8 @@ namespace Hlight.Structures.CompositeTask.Runtime
             }
 
             ApplyColor(from);
-            _tween = DOVirtual.Color(from, to, config.duration, ApplyColor).SetEase(config.ease);
+            _tween = DOVirtual.Color(from, to, config.duration, ApplyColor)
+                .SetEase(config.ease).SetSpeedBased(config.speedBased);
             await _tween.ToUniTask(cancellationToken: ct);
         }
 
@@ -69,6 +70,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
             public bool isFrom;
             public float duration = 0.5f;
             public Ease ease = Ease.InOutSine;
+            public bool speedBased;
         }
     }
 }

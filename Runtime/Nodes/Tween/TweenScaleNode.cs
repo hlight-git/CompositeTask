@@ -14,7 +14,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         protected override async UniTask OnRunning(Settings config, CancellationToken ct)
         {
-            var dur = config.speedBased ? 1f : config.duration;
+            var dur = config.duration;
             _tween = target.DOScale(config.value, dur);
 
             if (config.isFrom) _tween.From(config.relative);

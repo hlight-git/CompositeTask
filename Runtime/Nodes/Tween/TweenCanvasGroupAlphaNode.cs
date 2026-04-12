@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace Hlight.Structures.CompositeTask.Runtime
 {
-    [DefineTaskNode("Tween Canvas Group Alpha", Category = "Tween", Description = "Tweens CanvasGroup alpha. Ref: target (CanvasGroup). Config: value (float 0-1), isFrom (bool), duration, ease.")]
+    [DefineTaskNode("Tween Canvas Group Alpha", Category = "Tween", Description = "Tweens CanvasGroup alpha. Ref: target (CanvasGroup). Config: value (float 0-1), isFrom (bool), duration, ease, speedBased.")]
     public class TweenCanvasGroupAlphaNode : TaskNode<TweenCanvasGroupAlphaNode.Settings>
     {
         [SerializeField] private CanvasGroup target;
@@ -18,11 +18,13 @@ namespace Hlight.Structures.CompositeTask.Runtime
             {
                 float current = target.alpha;
                 target.alpha = config.value;
-                _tween = target.DOFade(current, config.duration).SetEase(config.ease);
+                _tween = target.DOFade(current, config.duration)
+                    .SetEase(config.ease).SetSpeedBased(config.speedBased);
             }
             else
             {
-                _tween = target.DOFade(config.value, config.duration).SetEase(config.ease);
+                _tween = target.DOFade(config.value, config.duration)
+                    .SetEase(config.ease).SetSpeedBased(config.speedBased);
             }
             await _tween.ToUniTask(cancellationToken: ct);
         }
@@ -47,6 +49,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
             public bool isFrom;
             public float duration = 0.5f;
             public Ease ease = Ease.InOutSine;
+            public bool speedBased;
         }
     }
 }
