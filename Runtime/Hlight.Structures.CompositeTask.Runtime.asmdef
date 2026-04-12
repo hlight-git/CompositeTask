@@ -1,6 +1,6 @@
 {
     "name": "Hlight.Structures.CompositeTask.Runtime",
-    "rootNamespace": "",
+    "rootNamespace": "Hlight.Structures.CompositeTask.Runtime",
     "references": [
         "UniTask"
     ],
