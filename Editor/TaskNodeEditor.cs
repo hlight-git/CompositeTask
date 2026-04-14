@@ -191,8 +191,8 @@ namespace Hlight.Structures.CompositeTask.Editor
 
         private static readonly HashSet<string> PackageAssemblies = new()
         {
-            "Hlight.Structures.TaskTree.Runtime",
-            "Hlight.Structures.TaskTree.Tween"
+            "Hlight.Structures.CompositeTask.Runtime",
+            "Hlight.Structures.CompositeTask.Tween"
         };
 
         protected override AdvancedDropdownItem BuildRoot()
