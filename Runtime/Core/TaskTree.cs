@@ -81,6 +81,9 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         public void Accept(IDependencyInjectionVisitor visitor) => Root?.Accept(visitor);
 
+        /// <summary>Pre-warms the entire tree without executing. Safe to call before Execute().</summary>
+        public void Warm() => Root?.Warm();
+
         private void OnDestroy() => Dispose();
 
         // ── Internals ──────────────────────────────────────────────────
