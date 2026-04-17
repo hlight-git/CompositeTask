@@ -15,5 +15,7 @@ namespace Hlight.Structures.CompositeTask.Runtime
         private List<TaskNodePreset> _nodePresets = new();
 
         public IReadOnlyList<TaskNodePreset> NodePresets => _nodePresets;
+
+        protected override IReadOnlyList<TaskNodePreset> GetNodePresets() => _nodePresets;
     }
 }

@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using Cysharp.Threading.Tasks;
+using Hlight.Structures.CompositeTask.Runtime.Blueprint;
 using UnityEngine;
 
 namespace Hlight.Structures.CompositeTask.Runtime
@@ -83,6 +85,32 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         /// <summary>Pre-warms the entire tree without executing. Safe to call before Execute().</summary>
         public void Warm() => Root?.Warm();
+
+        /// <summary>
+        /// Clears existing TaskNode children, then builds a new hierarchy from JSON under this transform.
+        /// Override <see cref="GetNodePresets"/> to supply preset prefabs for leaf nodes.
+        /// </summary>
+        public void LoadFromJson(string json)
+        {
+            var blueprint = BlueprintJsonParser.Parse(json);
+            if (blueprint?.root == null) return;
+
+            CancelCts();
+            UnsubscribeRoot();
+            _root = null;
+
+            for (int i = transform.childCount - 1; i >= 0; i--)
+            {
+                var child = transform.GetChild(i);
+                if (child.GetComponent<TaskNode>() != null)
+                    Destroy(child.gameObject);
+            }
+
+            TaskTreeBuilder.BuildNode(blueprint.root, transform, GetNodePresets());
+        }
+
+        /// <summary>Override to supply preset prefabs used during <see cref="LoadFromJson"/>.</summary>
+        protected virtual IReadOnlyList<TaskNodePreset> GetNodePresets() => null;
 
         private void OnDestroy() => Dispose();
 
