@@ -102,8 +102,11 @@ namespace Hlight.Structures.CompositeTask.Runtime
             for (int i = transform.childCount - 1; i >= 0; i--)
             {
                 var child = transform.GetChild(i);
-                if (child.GetComponent<TaskNode>() != null)
-                    Destroy(child.gameObject);
+                if (child.GetComponent<TaskNode>() == null) continue;
+                // Detach before destroy so BuildNode won't see stale children in childCount.
+                child.SetParent(null, false);
+                if (Application.isPlaying) Destroy(child.gameObject);
+                else DestroyImmediate(child.gameObject);
             }
 
             TaskTreeBuilder.BuildNode(blueprint.root, transform, GetNodePresets());

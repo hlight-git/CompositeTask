@@ -136,6 +136,7 @@ public class MyTaskNode : TaskNode<MyTaskNode.Settings>
 | Play Animator | Animator state (Once/OnceAndWait/Loop) |
 | Play Animation | Legacy Animation clip |
 | Play Sound | AudioSource + optional clip override |
+| Stop Sound | Stops AudioSource playback on completion |
 | Particle System | Play particle (PlayAndWait/PlayAndForget) |
 
 ### Tween (DOTween)
@@ -206,6 +207,21 @@ sequentialNode.InsertInline(new MyLogic());
 
 Import/Export via TaskTree Inspector foldout. `type` = `"sequential"` | `"parallel"` | DefineTaskNode Id.
 
+### Runtime JSON Loading
+
+Build a task tree into an existing `TaskTree` from JSON at runtime:
+
+```csharp
+taskTree.LoadFromJson(jsonString);  // destroys existing children, builds new hierarchy
+taskTree.Execute();
+```
+
+### PresetTaskTree (prefab-backed leaves)
+
+`PresetTaskTree` maps `typeId → prefab`. During `LoadFromJson`, matching leaf nodes are instantiated from the preset prefab (preserving pre-set `[SerializeField]` refs like `AudioSource`, `Transform`), then JSON `config` is applied on top via `IConfigurable.ApplyConfig`. Non-matching leaves fall back to plain GameObject + AddComponent.
+
+Use case: JSON controls flow + configurable data; prefabs provide Unity object references that can't be serialized to JSON.
+
 ## Dependency Injection
 
 Visitor pattern — opt-in per task:
@@ -226,8 +242,9 @@ taskTree.Accept(visitor);  // propagates to all nodes
 
 - **Hierarchy icons** — procedural (↓ Sequential, ≡ Parallel, ● Leaf, ✕ Invalid)
 - **Status colors** — icon changes color during play (blue=Running, yellow=Finishing, green=Completed, red=Failed)
-- **Add Child dropdown** — categorized, searchable, nested via `/` in Category
-- **Switch Sequential↔Parallel** — one-click button in Inspector
+- **Add Child dropdown** — categorized, searchable, nested via `/` in Category. Package nodes grouped above project nodes.
+- **Switch Sequential↔Parallel** — one-click button in Inspector. If GameObject name was the default ("Sequential"/"Parallel"), it auto-renames on switch.
+- **GameObject menu** — `GameObject/Composite Task/` → Task Tree (with root), Sequential Node, Parallel Node
 - **Validation warnings** — orphan nodes, invalid placement (via `IsValidChild`)
 - **Import/Export JSON** — with overwrite confirmation
 - **Runtime controls** — Execute/Reset/Dispose buttons, progress bar, status display
@@ -236,15 +253,16 @@ taskTree.Accept(visitor);  // propagates to all nodes
 
 ```
 Runtime/
-├── Core/           — TaskNode, CompositeNode, Sequential, Parallel, TaskTree, enums
+├── Core/           — TaskNode, CompositeNode, Sequential, Parallel, TaskTree, PresetTaskTree, enums
 ├── Blueprint/      — IBlueprint, BlueprintTree, JSON parser, TaskNodePreset
 ├── Builder/        — TaskTreeBuilder, TaskNodeRegistry
 └── Nodes/
+    ├── Audio/       — PlaySoundNode, StopSoundNode
     ├── Conditional/ — ConditionalNode, TaskCondition
     ├── Inline/      — IInlineTask, InlineTaskNode, extensions
     ├── Event/       — TaskEventSource, WaitEventNode, sources
     ├── Tween/       — DOTween nodes (separate asmdef)
-    └── *.cs         — utility/animation/audio nodes
+    └── *.cs         — utility/animation nodes
 Editor/
-└── *.cs            — inspectors, hierarchy decorator, JSON exporter
+└── *.cs            — inspectors, hierarchy decorator, JSON exporter, menu items
 ```
