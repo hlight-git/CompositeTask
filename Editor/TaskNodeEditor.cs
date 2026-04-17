@@ -73,15 +73,28 @@ namespace Hlight.Structures.CompositeTask.Editor
 
         private static void SwitchMode(GameObject go, bool fromSequential)
         {
+            const string seqName = "Sequential";
+            const string parName = "Parallel";
+
             if (fromSequential)
             {
                 Undo.DestroyObjectImmediate(go.GetComponent<SequentialNode>());
                 Undo.AddComponent<ParallelNode>(go);
+                if (go.name == seqName)
+                {
+                    Undo.RecordObject(go, "Switch to Parallel");
+                    go.name = parName;
+                }
             }
             else
             {
                 Undo.DestroyObjectImmediate(go.GetComponent<ParallelNode>());
                 Undo.AddComponent<SequentialNode>(go);
+                if (go.name == parName)
+                {
+                    Undo.RecordObject(go, "Switch to Sequential");
+                    go.name = seqName;
+                }
             }
         }
 
