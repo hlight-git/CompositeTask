@@ -1,0 +1,26 @@
+using System.Threading;
+using Cysharp.Threading.Tasks;
+using UnityEngine;
+using Hlight.Structures.CompositeTask.Runtime;
+
+namespace {{NAMESPACE}}
+{
+    [DefineTaskNode("{{DISPLAY_NAME}}", Category = "{{CATEGORY}}", Description = "{{DESCRIPTION}}")]
+    public class {{CLASS_NAME}} : TaskNode
+    {
+{{SERIALIZED_FIELDS}}
+        protected override UniTask OnRunning(CancellationToken ct)
+        {
+            // TODO: async work goes here. If this task is a one-shot sync side-effect,
+            // keep OnRunning empty (return UniTask.CompletedTask) and do the work in OnCompleted.
+            return UniTask.CompletedTask;
+        }
+
+        // Uncomment if the task has a guaranteed sync side-effect that must always fire:
+        // protected override void OnCompleted()
+        // {
+        //     // e.g. source.Stop();
+        //     base.OnCompleted();
+        // }
+    }
+}

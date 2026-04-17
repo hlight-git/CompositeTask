@@ -5,6 +5,8 @@ MonoBehaviour hierarchy-as-tree task execution system for Unity. Build behaviora
 **Namespace:** `Hlight.Structures.CompositeTask.Runtime`  
 **Dependencies:** UniTask, Newtonsoft.Json (for Blueprint JSON), DOTween (for Tween nodes)
 
+> **Bundled Claude Code skill**: this package ships a Claude Code skill at `.claude/skills/composite-task/` that teaches the AI how to create TaskNodes, author Blueprint JSON, and build task trees via Unity MCP. See `.claude/skills/composite-task/INSTALL.md` to enable it in your project.
+
 ## Architecture
 
 ```
