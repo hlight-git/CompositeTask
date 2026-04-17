@@ -8,12 +8,29 @@ namespace Hlight.Structures.CompositeTask.Runtime
     /// <summary>
     /// Fires all active children concurrently, then waits for all to complete.
     /// Detects runtime child insertion via OnTransformChildrenChanged and fires new children immediately.
+    /// Subclass and override <see cref="FireChild"/> to customize per-child launch behaviour
+    /// (e.g. staggered start, conditional skip). Use <see cref="RunningCt"/> inside overrides.
     /// </summary>
     public class ParallelNode : CompositeNode
     {
         private readonly HashSet<TaskNode> _firedChildren = new();
         private System.Func<bool> _allCompletedCheck;
         private CancellationToken _runningCt;
+
+        /// <summary>Cancellation token of the in-progress OnRunning call. Default if not running.</summary>
+        protected CancellationToken RunningCt => _runningCt;
+
+        /// <summary>Read-only view of children already fired this run (for subclass inspection).</summary>
+        protected IReadOnlyCollection<TaskNode> FiredChildren => _firedChildren;
+
+        /// <summary>
+        /// Mark a child as fired so <see cref="OnTransformChildrenChanged"/> won't fire it again.
+        /// Override <see cref="FireChild"/> without calling base? Call this to avoid double-launch.
+        /// </summary>
+        protected void MarkChildFired(TaskNode child)
+        {
+            if (child != null) _firedChildren.Add(child);
+        }
 
         protected override async UniTask OnRunning(CancellationToken ct)
         {
@@ -56,7 +73,13 @@ namespace Hlight.Structures.CompositeTask.Runtime
                 child.ForceComplete(immediate: true);
         }
 
-        private void FireChild(TaskNode child, CancellationToken ct)
+        /// <summary>
+        /// Launches a single child. Called once per child when Parallel enters Running,
+        /// and again on child insertion during Running. Override to customize per-child launch
+        /// (staggered delay, conditional skip, custom exception handler). When overriding,
+        /// either call base or manually track <see cref="FiredChildren"/> to keep insertion-during-run working.
+        /// </summary>
+        protected virtual void FireChild(TaskNode child, CancellationToken ct)
         {
             if (child == null || ct.IsCancellationRequested) return;
             if (child.Status != TaskStatus.Pending) return;
