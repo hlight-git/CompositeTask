@@ -1,0 +1,19 @@
+using UnityEngine;
+using Hlight.Structures.CompositeTask.Runtime;
+
+namespace {{NAMESPACE}}
+{
+    /// <summary>
+    /// {{DESCRIPTION}}
+    /// </summary>
+    public class {{CLASS_NAME}} : TaskCondition
+    {
+{{SERIALIZED_FIELDS}}
+        public override bool Evaluate()
+        {
+            // TODO: pure sync predicate. Return true if the associated branch should run.
+            // Do NOT mutate state. Keep this fast.
+            return false;
+        }
+    }
+}

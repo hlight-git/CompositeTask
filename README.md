@@ -1,300 +1,270 @@
 # Composite Task
 
-Hệ thống thực thi task dạng cây cho Unity. Cho phép khai báo chuỗi hành vi (tuần tự hoặc song song), theo dõi tiến trình, và can thiệp runtime (cancel, force complete).
+MonoBehaviour hierarchy-as-tree task execution system for Unity. Build behavioral sequences using the Transform hierarchy — sequential, parallel, conditional — with async execution, progress tracking, and runtime control.
 
-## Mục đích
+**Namespace:** `Hlight.Structures.CompositeTask.Runtime`  
+**Dependencies:** UniTask, Newtonsoft.Json (for Blueprint JSON), DOTween (for Tween nodes)
 
-Composite Task giải quyết bài toán: **mô hình hóa một chuỗi logic phức tạp thành cây khai báo, có thể theo dõi và kiểm soát tại runtime.**
+> **Bundled Claude Code skill**: this package ships a Claude Code skill at `.claude/skills/composite-task/` that teaches the AI how to create TaskNodes, author Blueprint JSON, and build task trees via Unity MCP. See `.claude/skills/composite-task/INSTALL.md` to enable it in your project.
 
-Các use case điển hình: quest/mission system, tutorial flow, cutscene scripting, onboarding sequence, hoặc bất kỳ workflow nào cần chia nhỏ thành các bước con với tiến trình rõ ràng.
-
-Hệ thống được thiết kế theo nguyên tắc: framework chỉ lo **cấu trúc cây + thực thi + progress**, toàn bộ logic cụ thể nằm trong `ITaskDefinition` do user implement. Framework không biết và không cần biết task làm gì.
-
-## Dependencies
-
-- [UniTask](https://github.com/Cysharp/UniTask)
-- [Newtonsoft.Json (com.unity.nuget.newtonsoft-json)](https://docs.unity3d.com/Packages/com.unity.nuget.newtonsoft-json@3.0/manual/index.html) — dùng cho JSON import/export
-- (Tùy chọn) [Odin Inspector](https://odininspector.com/) — nếu có, Task Tree Editor tự động dùng Odin PropertyTree để vẽ task definition fields
-
-## Cấu trúc
+## Architecture
 
 ```
-Runtime/
-  ATaskNode.cs                    — Base class cho mọi node (progress, status, lifecycle)
-  CompositeTaskNode.cs            — Node chứa children, chạy Sequential hoặc Parallel
-  MonoTaskNode.cs                 — Node lá, wrap một ITaskDefinition
-  TaskTree.cs                     — Serializable class giữ root node, entry point để Execute
-  ITaskDefinition.cs              — Interface user implement cho logic cụ thể
-  IDependencyInjectionVisitor.cs  — Visitor pattern cho dependency injection
-  IDependencyInjectionVisitable.cs — Opt-in interface để task definition nhận DI
-  ExecutionMode.cs                — Enum: Sequential, Parallel
-  TaskNodeStatus.cs               — Enum: Pending, Running, Completed
-
-Editor/
-  TaskTreePropertyDrawer.cs       — PropertyDrawer cho TaskTree, vẽ inline trong Inspector (Hierarchy + Inspector panel)
-  TaskTreeSerializationBinder.cs  — Whitelist binder cho JSON deserialization
-  TaskDefinitionDatabase.cs       — ScriptableObject chứa danh sách ITaskDefinition types
-  TaskDefinitionDatabaseEditor.cs — CustomEditor cho TaskDefinitionDatabase ScriptableObject
-  SearchablePopup.cs              — Dropdown popup có search field cho chọn TaskDefinition type
+TaskTree (MonoBehaviour)          — root manager, CTS lifecycle, event forwarding
+  └── CompositeNode               — base for Sequential/Parallel
+        ├── SequentialNode         — runs children one-by-one
+        ├── ParallelNode           — fires all children concurrently
+        └── TaskNode               — abstract base for all nodes
+              ├── TaskNode<TConfig> — generic base with typed Settings
+              └── ConditionalNode   — branching: first matching condition executes
 ```
 
-## Kiến trúc tổng quan
+Transform hierarchy = task tree. Children GameObjects = child tasks. No serialized lists — Unity's scene graph IS the data structure.
 
-```
-TaskTree (Serializable class, không phải MonoBehaviour)
-  └── CompositeTaskNode (Root, Sequential hoặc Parallel)
-        ├── MonoTaskNode → ITaskDefinition (logic cụ thể)
-        ├── MonoTaskNode → ITaskDefinition
-        └── CompositeTaskNode (nested, có thể lồng không giới hạn)
-              ├── MonoTaskNode → ITaskDefinition
-              └── ...
-```
-
-`TaskTree` là một `[Serializable]` class thuần — không phải MonoBehaviour. Nó được nhúng như field trong MonoBehaviour hoặc ScriptableObject tùy theo nhu cầu sử dụng. Root node được khởi tạo sẵn.
-
-Cây chỉ có 2 loại node:
-
-- **CompositeTaskNode** — node cha, chứa children. Mỗi child có `enabled` (bật/tắt), `subTaskValue` (trọng số progress). Chạy children theo `executionMode`: Sequential (lần lượt) hoặc Parallel (đồng thời).
-- **MonoTaskNode** — node lá, wrap một `ITaskDefinition`. Toàn bộ logic game nằm ở đây.
-
-## Lifecycle của một node
-
-```
-Pending ──Execute()──► Running ──OnBegin──► OnEnd──► OnCompleted()──► Completed
-                         │                               ▲
-                    ForceComplete()                       │
-                         │                               │
-                    cancel OnBegin ──► OnEnd ────────────┘
-                    + OnCanceledWhenRunning
-
-ForceCompleteImmediate() ── cancel Begin+End ──► OnCompleted() ──► Completed
-```
-
-Khi `ExecuteAsync()` được gọi:
-
-1. Status chuyển sang `Running`.
-2. `OnTaskBegin(ct)` được gọi — đây là nơi logic chính chạy.
-3. Khi Begin hoàn thành (hoặc bị cancel), `OnTaskEnd(ct)` được gọi — dùng cho cleanup.
-4. Khi End hoàn thành, `OnCompleted()` được gọi — set Progress = 1, Status = Completed, fire event Completed.
-
-`OnCompleted()` là **điểm hoàn thành duy nhất** — mọi đường đi đều kết thúc ở đây:
-
-- `ExecuteAsync` hoàn thành bình thường → `OnCompleted()`
-- `ForceComplete()` khi Pending → `OnCompleted()` ngay
-- `ForceComplete()` khi Running → cancel Begin → chờ End → `OnCompleted()` (qua ExecuteAsync)
-- `ForceCompleteImmediate()` → cancel Begin + End → `OnCompleted()` ngay
-
-`MonoTaskNode` override `OnCompleted()` để gọi `taskDefinition.OnCompleted()` trước khi gọi `base.OnCompleted()`. Điều này đảm bảo task definition luôn được thông báo khi node hoàn thành, bất kể hoàn thành bằng cách nào.
-
-### Cancellation flow
-
-Khi external cancel xảy ra (từ `CancellationTokenSource` trả về bởi `Execute()`), ATaskNode gọi `CancelAllCancellationTokenSources()` — một virtual method cancel cả Begin lẫn End CTS. `MonoTaskNode` override method này để gọi thêm `taskDefinition.OnCanceledWhenRunning()` — cho phép task definition phản ứng ngay lập tức khi bị cancel (ví dụ: dừng animation, tắt UI), trước khi OnEnd hoặc OnCompleted chạy.
-
-## Progress
-
-Mỗi node có `Progress` (0→1) và `targetProgressToComplete` (mặc định 1.0).
-
-**MonoTaskNode:** `ITaskDefinition` tự set `node.Progress` trong `OnBegin` để báo tiến trình. Progress ở đây chỉ để hiển thị — node hoàn thành khi `OnBegin` + `OnEnd` chạy xong, không phải khi progress đạt 1.
-
-**CompositeTaskNode:** Progress được tính tự động từ children, có trọng số theo `subTaskValue`. Khi progress đạt `targetProgressToComplete`, composite sẽ auto-complete (gọi `ForceComplete`). Điều này cho phép pattern "hoàn thành 3/5 task phụ là đủ" bằng cách set `targetProgressToComplete = 0.6`.
-
-## Cách dùng
-
-### 1. Implement ITaskDefinition
+## Quick Start
 
 ```csharp
-[Serializable]
-public class WaitSecondsTask : ITaskDefinition
+// 1. Add TaskTree component to root GameObject
+// 2. Add SequentialNode or ParallelNode as child
+// 3. Add leaf TaskNodes as children of composites
+// 4. Execute:
+taskTree.Execute();          // fire-and-forget, returns CTS
+await taskTree.ExecuteAsync(ct);  // awaitable
+
+// 5. Listen:
+taskTree.StatusChanged += (node, status) => { };
+taskTree.ProgressChanged += (node, delta) => { };
+
+// 6. Control:
+taskTree.ForceComplete();
+taskTree.ResetTree();
+taskTree.Dispose();
+```
+
+## TaskNode Lifecycle
+
+```
+Pending → Running → Finishing → Completed
+              ↓          ↓
+            Failed     Failed
+```
+
+```
+Warm()           — one-time init before first execution (sealed, calls OnWarm)
+ExecuteAsync()   — OnRunning(ct) → OnFinishing(ct) → OnCompleted()
+ResetTask()      — OnReset() → clear events → Status = Pending
+Dispose()        — calls ResetTask()
+```
+
+### Override Points
+
+| Method | When | Must call base? |
+|--------|------|-----------------|
+| `OnWarm()` | Once before first execute | No |
+| `OnRunning(ct)` | Main async logic | Abstract |
+| `OnFinishing(ct)` | Cleanup after running | No |
+| `OnCompleted()` | Sync action on completion | Yes, first |
+| `OnReset()` | Cleanup during reset | No |
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `Status` | `TaskStatus` | Current lifecycle state |
+| `Progress` | `float [0,1]` | Set by node, fires ProgressChanged |
+| `Weight` | `float` | Progress weight in parent composite |
+| `Parent` | `CompositeNode` | Set by hierarchy rebuild |
+
+### Events
+
+| Event | Signature | Description |
+|-------|-----------|-------------|
+| `ProgressChanged` | `Action<TaskNode, float>` | Delta-based progress |
+| `StatusChanged` | `Action<TaskNode, TaskStatus>` | Every status transition |
+
+## Creating a Task
+
+```csharp
+[DefineTaskNode("My Task", Category = "Gameplay", 
+    Description = "Does something. Ref: target (Transform). Config: speed (float).")]
+public class MyTaskNode : TaskNode<MyTaskNode.Settings>
 {
-    public float duration = 1f;
+    [SerializeField] private Transform target;  // Unity refs on class
 
-    public async UniTask OnBegin(MonoTaskNode node, CancellationToken ct)
+    protected override async UniTask OnRunning(Settings config, CancellationToken ct)
     {
-        float elapsed = 0f;
-        while (elapsed < duration)
-        {
-            ct.ThrowIfCancellationRequested();
-            elapsed += Time.deltaTime;
-            node.Progress = elapsed / duration;
-            await UniTask.Yield(ct);
-        }
+        // async logic using config.speed and target
+        await UniTask.Delay(1000, cancellationToken: ct);
     }
 
-    public UniTask OnEnd(MonoTaskNode node, CancellationToken ct)
+    [Serializable]
+    public class Settings  // Pure data config
     {
-        // Cleanup nếu cần. Được gọi cả khi OnBegin bị cancel qua ForceComplete.
-        // KHÔNG được gọi khi ForceCompleteImmediate.
-        return UniTask.CompletedTask;
-    }
-
-    public void OnCompleted(MonoTaskNode node)
-    {
-        // Luôn được gọi khi node hoàn thành, bất kể bằng cách nào.
-        // Synchronous callback, chạy trước khi Status chuyển sang Completed.
-    }
-
-    public void OnCanceledWhenRunning(MonoTaskNode node)
-    {
-        // Gọi ngay khi external cancel xảy ra, trước OnEnd/OnCompleted.
-        // Dùng cho phản ứng tức thì: dừng animation, tắt UI, cleanup nhanh.
+        public float speed = 1f;
     }
 }
 ```
 
-Lưu ý quan trọng:
+**Rules:**
+- `[DefineTaskNode]` with Id, Description, optional Category
+- Unity object refs as `[SerializeField]` on the class
+- Pure data in nested `[Serializable] Settings` class
+- Access config via `Config` property outside `OnRunning`
 
-- Class **phải** có `[Serializable]` để Unity serialize qua `[SerializeReference]`.
-- `OnBegin` là nơi logic chính chạy. Luôn check `ct.ThrowIfCancellationRequested()` hoặc truyền `ct` vào các await để hỗ trợ cancel.
-- `OnEnd` được gọi sau OnBegin khi đi qua async flow (ExecuteAsync hoặc ForceComplete khi Running). **Không** được gọi khi `ForceCompleteImmediate` hoặc `ForceComplete` từ Pending.
-- `OnCompleted` **luôn được gọi** khi node hoàn thành — dù là qua ExecuteAsync, ForceComplete, hay ForceCompleteImmediate. Synchronous callback, chạy trước khi Status = Completed.
-- `OnCanceledWhenRunning` được gọi ngay khi external cancel xảy ra — **trước** cả OnEnd và OnCompleted. Dùng cho side effects cần phản ứng tức thì (dừng Tween, tắt particle, ẩn UI...).
+## Built-in Nodes
 
-### 2. Dependency Injection (tùy chọn)
+### Utility
+| Node | Description |
+|------|-------------|
+| Wait | Pause execution (milliseconds or frames) |
+| Set Transform | Instant position/rotation/scale |
+| Set Active GO | Activate/deactivate GameObject |
+| Set Component Enabled | Enable/disable Behaviour |
+| Force Complete | Force-complete another node |
+| Set Progress | Set progress on another node |
+| Instantiate | Spawn prefab at runtime |
+| Destroy | Destroy GameObject |
+| Invoke Unity Event | Fire UnityEvent |
+| Time Scale | Set Time.timeScale (restores on reset) |
 
-DI là **opt-in**. Task definition chỉ nhận DI khi implement `IDependencyInjectionVisitable`:
+### Event
+| Node | Description |
+|------|-------------|
+| Wait Event | Wait for TaskEventSource(s) — Any or All mode |
+
+### Animation & Audio
+| Node | Description |
+|------|-------------|
+| Play Animator | Animator state (Once/OnceAndWait/Loop) |
+| Play Animation | Legacy Animation clip |
+| Play Sound | AudioSource + optional clip override |
+| Stop Sound | Stops AudioSource playback on completion |
+| Particle System | Play particle (PlayAndWait/PlayAndForget) |
+
+### Tween (DOTween)
+| Node | Description |
+|------|-------------|
+| Tween Position | value + isFrom + localSpace + speedBased + relative |
+| Tween Rotation | Euler angles |
+| Tween Scale | Local scale |
+| Tween Anchor Pos | RectTransform |
+| Tween Color | SpriteRenderer[] + Graphic[] |
+| Tween Canvas Group Alpha | CanvasGroup fade |
+| Tween Float | Generic float via UnityEvent callback |
+
+### Special
+| Node | Description |
+|------|-------------|
+| Conditional | Branch: evaluate conditions top-down, execute first match |
+| Run Sub Tree | Execute another TaskTree |
+
+## Composite Nodes
+
+**SequentialNode** — runs active children one-by-one. Exposes `CurrentChild`/`CurrentChildIndex`.
+
+**ParallelNode** — fires all active children concurrently. Detects runtime child insertion via `OnTransformChildrenChanged`. Disabled children during execution are force-completed.
+
+**Progress aggregation** — weighted by `Weight`. Parent progress = sum of (child delta × child weight / total weight).
+
+## Conditional Node
+
+```
+ConditionalNode
+├── Branch[0]: condition=HealthCheck, node=HealSequence
+├── Branch[1]: condition=null, node=DefaultSequence  ← fallback
+```
+
+`TaskCondition` — abstract MonoBehaviour with `bool Evaluate()`. Assign to branches via Inspector.
+
+## Inline Tasks (Runtime)
+
+Insert logic without creating MonoBehaviour:
 
 ```csharp
-[Serializable]
-public class MoveToTask : ITaskDefinition, IDependencyInjectionVisitable
+// Lambda
+sequentialNode.InsertInline(async ct => await UniTask.Delay(1000, ct));
+
+// Full lifecycle
+public class MyLogic : IInlineTask
 {
-    [NonSerialized] public PlayerController player;
+    public UniTask OnRunning(CancellationToken ct) => ...;
+    public void OnWarm() { }
+    public void OnReset() { }
+}
+sequentialNode.InsertInline(new MyLogic());
+```
 
-    public void Accept(IDependencyInjectionVisitor visitor) => visitor.Visit(this);
+## Blueprint (JSON Import/Export)
 
-    public async UniTask OnBegin(MonoTaskNode node, CancellationToken ct)
-    {
-        // Dùng player đã được inject
-        await player.MoveTo(targetPosition, ct);
-    }
-
-    // ... OnEnd, OnCompleted, OnCanceledWhenRunning
+```json
+{
+  "type": "sequential",
+  "name": "Root",
+  "children": [
+    { "type": "Wait", "name": "Delay", "config": { "value": 1000, "unit": 1 } },
+    { "type": "parallel", "children": [...] }
+  ]
 }
 ```
 
-Tạo visitor:
+Import/Export via TaskTree Inspector foldout. `type` = `"sequential"` | `"parallel"` | DefineTaskNode Id.
+
+### Runtime JSON Loading
+
+Build a task tree into an existing `TaskTree` from JSON at runtime:
 
 ```csharp
-public class GameVisitor : IDependencyInjectionVisitor
-{
-    readonly PlayerController _player;
-    readonly DialogueSystem _dialogue;
-
-    public GameVisitor(PlayerController player, DialogueSystem dialogue)
-    {
-        _player = player;
-        _dialogue = dialogue;
-    }
-
-    public void Visit<T>(T target)
-    {
-        if (target is MoveToTask move) move.player = _player;
-        if (target is DialogueTask dlg) dlg.dialogueSystem = _dialogue;
-    }
-}
-
-// Gọi trước Execute:
-taskTree.Accept(new GameVisitor(player, dialogue));
+taskTree.LoadFromJson(jsonString);  // destroys existing children, builds new hierarchy
 taskTree.Execute();
 ```
 
-Task definition **không** implement `IDependencyInjectionVisitable` sẽ được bỏ qua khi Accept — không lỗi, không side effect.
+### PresetTaskTree (prefab-backed leaves)
 
-### 3. Đăng ký vào TaskDefinitionDatabase
+`PresetTaskTree` maps `typeId → prefab`. During `LoadFromJson`, matching leaf nodes are instantiated from the preset prefab (preserving pre-set `[SerializeField]` refs like `AudioSource`, `Transform`), then JSON `config` is applied on top via `IConfigurable.ApplyConfig`. Non-matching leaves fall back to plain GameObject + AddComponent.
 
-Tạo asset từ menu: **Create → Task Tree → Task Definition Database**. Chọn asset trong Project, Inspector sẽ hiện form quản lý. Chọn type từ dropdown (có search), điền display name và description, rồi **Add Entry**. Chỉ các type đã đăng ký mới xuất hiện khi thêm MonoTaskNode trong Inspector.
+Use case: JSON controls flow + configurable data; prefabs provide Unity object references that can't be serialized to JSON.
 
-Mỗi entry có:
+## Dependency Injection
 
-- `displayName` — tên hiển thị trong editor (để trống sẽ dùng tên type).
-- `description` — mô tả ngắn gọn task làm gì, phục vụ cho cả người dùng editor và AI khi sinh JSON.
-- `script` — MonoScript trỏ tới class implement ITaskDefinition.
-- `typeSerializationBindingMode` — chọn cách binder identify type khi serialize/deserialize JSON:
-  - `ByDisplayName` (mặc định) — dùng display name.
-  - `ByTypeName` — dùng tên type (không bao gồm namespace).
-  - `ByTypeFullName` — dùng full name bao gồm namespace, cần thiết khi có class trùng tên giữa các namespace.
-
-### 4. Xây dựng cây trong Editor
-
-- `TaskTree` là serializable class — nhúng nó như field trong MonoBehaviour hoặc ScriptableObject của bạn.
-- Inspector tự động hiện **TaskTree PropertyDrawer** inline khi chọn object chứa TaskTree field. Gồm 3 phần: Import/Export buttons, Hierarchy panel (cây node), và Inspector panel (chi tiết node đang chọn).
-- Root node đã được tạo sẵn. Thêm children, gán task definition cho MonoTaskNode.
-
-### 5. Execute
+Visitor pattern — opt-in per task:
 
 ```csharp
-var cts = taskTree.Execute();
+public class MyVisitor : IDependencyInjectionVisitor
+{
+    public void Visit<T>(T target)
+    {
+        if (target is MyTaskNode t) t.Camera = myCamera;
+    }
+}
 
-// Cancel từ bên ngoài khi cần:
-cts.Cancel();
+taskTree.Accept(visitor);  // propagates to all nodes
 ```
 
-## Best Practices
+## Editor Features
 
-**Thiết kế ITaskDefinition:**
+- **Hierarchy icons** — procedural (↓ Sequential, ≡ Parallel, ● Leaf, ✕ Invalid)
+- **Status colors** — icon changes color during play (blue=Running, yellow=Finishing, green=Completed, red=Failed)
+- **Add Child dropdown** — categorized, searchable, nested via `/` in Category. Package nodes grouped above project nodes.
+- **Switch Sequential↔Parallel** — one-click button in Inspector. If GameObject name was the default ("Sequential"/"Parallel"), it auto-renames on switch.
+- **GameObject menu** — `GameObject/Composite Task/` → Task Tree (with root), Sequential Node, Parallel Node
+- **Validation warnings** — orphan nodes, invalid placement (via `IsValidChild`)
+- **Import/Export JSON** — with overwrite confirmation
+- **Runtime controls** — Execute/Reset/Dispose buttons, progress bar, status display
 
-- Mỗi task definition nên làm **một việc duy nhất**. "Di chuyển đến vị trí", "Hiển thị dialogue", "Chờ input" — không phải "Di chuyển rồi nói chuyện rồi chờ".
-- Luôn xử lý cancellation đúng cách trong `OnBegin`. Nếu task có vòng lặp hoặc await dài, truyền `CancellationToken` vào hoặc check thường xuyên.
-- Đặt logic cleanup có thể async trong `OnEnd`. Logic cleanup synchronous đặt trong `OnCompleted`.
-- Dùng `OnCanceledWhenRunning` cho side effects cần phản ứng ngay khi cancel (dừng Tween, tắt particle). Không dùng cho cleanup chính — cleanup thuộc về `OnEnd` và `OnCompleted`.
-- `OnCompleted` luôn được gọi bất kể completion path nào — đây là nơi đáng tin cậy nhất cho final cleanup. Nhưng giữ nó nhẹ vì synchronous.
-- Chỉ implement `IDependencyInjectionVisitable` khi task definition thực sự cần nhận dependencies từ bên ngoài. Không cần thì bỏ qua.
+## File Structure
 
-**Thiết kế cây:**
-
-- Dùng `CompositeTaskNode` Sequential cho flow tuyến tính (bước 1 → bước 2 → bước 3).
-- Dùng Parallel khi nhiều việc cần chạy đồng thời (ví dụ: spawn enemies + play music + start timer).
-- Lồng Composite để tạo cấu trúc phức tạp: một quest Sequential chứa nhiều objective, mỗi objective là một Composite Parallel chứa các subtask.
-- `subTaskValue` kiểm soát trọng số progress. Set 0 cho task không đóng góp vào progress bar (ví dụ: task khởi tạo). Tổng subTaskValue không cần bằng 1 — hệ thống tự normalize.
-- `targetProgressToComplete < 1` cho phép complete sớm. Ví dụ: 5 optional objectives với subTaskValue bằng nhau, set `targetProgressToComplete = 0.6` → hoàn thành 3/5 là đủ.
-- Dùng `Child.enabled = false` để tạm tắt một nhánh mà không cần xóa khỏi cây.
-
-**Runtime:**
-
-- Gọi `Accept(visitor)` **trước** `Execute()` để đảm bảo dependencies đã inject.
-- Giữ reference đến `CancellationTokenSource` trả về từ `Execute()` nếu cần cancel từ bên ngoài.
-- `InsertChild` cho phép thêm task vào cây đang chạy. Trong Parallel mode, child mới được execute ngay. Trong Sequential mode, chỉ child insert **sau** task đang chạy mới được execute — child insert trước vị trí hiện tại sẽ bị bỏ qua.
-
-**Data sharing giữa các task:**
-
-- Framework không có built-in data sharing. Nếu task A cần truyền kết quả cho task B, dùng một trong các cách: inject shared object qua DI Visitor, hoặc tạo MonoBehaviour/ScriptableObject chứa shared state và reference từ các task definition.
-
-## Tính năng Editor
-
-TaskTree được render inline trong Unity Inspector qua `TaskTreePropertyDrawer` — không cần mở EditorWindow riêng.
-
-- **Hierarchy panel** — Cây task với expand/collapse, drag-drop reorder, inline rename (F2), search filter, multi-select.
-- **Inspector panel** — Chỉnh execution mode, children, subTaskValue, task definition fields. Chọn task definition type qua dropdown có search (SearchablePopup).
-- **Runtime monitoring** — Status dot, progress bar, Force Complete / Reset buttons khi Play Mode.
-- **Keyboard shortcuts** — Arrow keys điều hướng, Ctrl+D duplicate, Ctrl+C/V copy-paste, Delete xóa, Alt+Arrow expand/collapse all.
-- **Import/Export JSON** — Buttons nằm trên cùng của PropertyDrawer. Export cây ra file JSON, import từ file JSON.
-- **TaskDefinitionDatabase** — Quản lý trực tiếp trong Inspector của ScriptableObject (CustomEditor), không cần EditorWindow riêng. Có foldable entries, add entry form, export JSON.
-- **Odin Inspector** — Khi project có cài Odin (`ODIN_INSPECTOR` defined), PropertyDrawer tự động dùng Odin PropertyTree để vẽ task definition fields, hỗ trợ custom attribute drawers (ShowIf, FoldoutGroup...). Khi không có Odin, dùng reflection-based fallback.
-
-## JSON Import / Export
-
-Export cây task ra JSON và import lại qua các buttons Import/Export trên TaskTree PropertyDrawer.
-
-Deserialization sử dụng `TaskTreeSerializationBinder` — một whitelist binder chỉ cho phép deserialize các type đã đăng ký trong `TaskDefinitionDatabase` (cùng với các structural types: `CompositeTaskNode`, `MonoTaskNode`). Binder duy trì hai dictionary hai chiều (`Type↔string`) để map giữa type và tên serialization. Mọi type không nằm trong whitelist sẽ bị reject, chặn type injection từ JSON không tin cậy. `BindToName` trả về `assemblyName = null` để JSON chỉ chứa type name, không chứa assembly info.
-
-Mỗi entry trong database có tùy chọn `typeSerializationBindingMode` quyết định cách binder identify type: `ByDisplayName` (dùng display name), `ByTypeName` (dùng tên type), hoặc `ByTypeFullName` (dùng full name bao gồm namespace — cần thiết khi có class trùng tên giữa các namespace khác nhau).
-
-JSON format tuân theo cấu trúc cây: mỗi node chứa `$type`, `name`, `executionMode`/`taskDefinition`, và `children`. Có thể dùng AI để sinh JSON từ mô tả tự nhiên, miễn là AI biết danh sách task definition types (export từ TaskDefinitionDatabase Inspector) và tuân theo format.
-
-## Khái niệm chính
-
-| Khái niệm | Mô tả |
-|---|---|
-| `TaskTree` | Serializable class entry point. Giữ root node, cung cấp `Execute()` và `Accept()` |
-| `CompositeTaskNode` | Node cha, chứa children. Chạy Sequential hoặc Parallel |
-| `MonoTaskNode` | Node lá. Wrap một `ITaskDefinition` |
-| `ITaskDefinition` | Interface user implement. Chứa logic cụ thể của task |
-| `IDependencyInjectionVisitable` | Opt-in interface để task definition nhận DI qua visitor |
-| `IDependencyInjectionVisitor` | Visitor để inject dependencies vào task definitions trước khi execute |
-| `OnCompleted()` | Điểm hoàn thành duy nhất — mọi completion path đều đi qua đây |
-| `OnCanceledWhenRunning()` | Callback gọi ngay khi external cancel, trước OnEnd/OnCompleted |
-| `subTaskValue` | Trọng số đóng góp vào progress của parent (0 = không đóng góp) |
-| `targetProgressToComplete` | Ngưỡng progress để auto-complete composite (mặc định 1.0) |
-| `ForceComplete()` | Cancel Begin, chờ End, rồi OnCompleted |
-| `ForceCompleteImmediate()` | Cancel tất cả, gọi OnCompleted ngay |
-| `TaskDefinitionDatabase` | ScriptableObject whitelist các ITaskDefinition type được phép dùng |
-| `TaskTreeSerializationBinder` | Whitelist binder cho JSON deserialization, chặn type injection |
+```
+Runtime/
+├── Core/           — TaskNode, CompositeNode, Sequential, Parallel, TaskTree, PresetTaskTree, enums
+├── Blueprint/      — IBlueprint, BlueprintTree, JSON parser, TaskNodePreset
+├── Builder/        — TaskTreeBuilder, TaskNodeRegistry
+└── Nodes/
+    ├── Audio/       — PlaySoundNode, StopSoundNode
+    ├── Conditional/ — ConditionalNode, TaskCondition
+    ├── Inline/      — IInlineTask, InlineTaskNode, extensions
+    ├── Event/       — TaskEventSource, WaitEventNode, sources
+    ├── Tween/       — DOTween nodes (separate asmdef)
+    └── *.cs         — utility/animation nodes
+Editor/
+└── *.cs            — inspectors, hierarchy decorator, JSON exporter, menu items
+```
