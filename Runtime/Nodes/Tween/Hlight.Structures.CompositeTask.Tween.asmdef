@@ -1,13 +1,14 @@
 {
-    "name": "Hlight.Structures.CompositeTask.Editor",
-    "rootNamespace": "Hlight.Structures.CompositeTask.Editor",
+    "name": "Hlight.Structures.CompositeTask.Tween",
+    "rootNamespace": "",
     "references": [
         "Hlight.Structures.CompositeTask.Runtime",
-        "UniTask"
+        "UniTask",
+        "DOTween.Modules",
+        "UniTask.DOTween",
+        "DOTweenPro.Scripts"
     ],
-    "includePlatforms": [
-        "Editor"
-    ],
+    "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
     "overrideReferences": false,

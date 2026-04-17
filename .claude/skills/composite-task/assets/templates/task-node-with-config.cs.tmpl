@@ -1,0 +1,33 @@
+using System;
+using System.Threading;
+using Cysharp.Threading.Tasks;
+using UnityEngine;
+using Hlight.Structures.CompositeTask.Runtime;
+
+namespace {{NAMESPACE}}
+{
+    [DefineTaskNode("{{DISPLAY_NAME}}", Category = "{{CATEGORY}}", Description = "{{DESCRIPTION}}")]
+    public class {{CLASS_NAME}} : TaskNode<{{CLASS_NAME}}.Settings>
+    {
+{{SERIALIZED_FIELDS}}
+        protected override async UniTask OnRunning(Settings config, CancellationToken ct)
+        {
+            // TODO: async work using config.* and [SerializeField] refs.
+            // Respect the token: pass `ct` to every awaited call.
+            await UniTask.Yield(ct);
+        }
+
+        // Uncomment if the task has a guaranteed sync side-effect that must always fire:
+        // protected override void OnCompleted()
+        // {
+        //     // e.g. target.SetActive(Config.active);
+        //     base.OnCompleted();
+        // }
+
+        [Serializable]
+        public class Settings
+        {
+{{CONFIG_FIELDS}}
+        }
+    }
+}
