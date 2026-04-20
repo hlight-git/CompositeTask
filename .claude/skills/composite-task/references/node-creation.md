@@ -269,15 +269,28 @@ Warnings appear in the Inspector above the node fields.
 
 ## DI (dependency injection)
 
-If the task needs a runtime-injected reference (camera, service), expose a public property and override `Accept`:
+If the task needs a runtime-injected reference (camera, service), override `ResolveDependencies` and pull from the context. Always call `base.ResolveDependencies(context)` first.
 
 ```csharp
-public Camera CameraForInput { get; set; }
+using Apero.Unity.Architecture.DependencyInjection;
 
-public override void Accept(IDependencyInjectionVisitor v)
+public class ShakeCameraNode : TaskNode<ShakeCameraNode.Settings>
 {
-    v.Visit(this);  // default — the visitor inspects this node's type
+    private Camera _camera;
+
+    public override void ResolveDependencies(IDependencyContext context)
+    {
+        base.ResolveDependencies(context);
+        _camera = context.Resolve<Camera>();
+    }
+    // ...
 }
 ```
 
-The project-level visitor implementation checks the node type and assigns refs. See `di-visitor.md`.
+The tree applies the context once (typically after build, before Execute):
+
+```csharp
+taskTree.ResolveDependencies(CompositeContext.Instance);
+```
+
+See `di-resolve.md` for propagation details, optional deps (`TryResolve`), and timing rules.

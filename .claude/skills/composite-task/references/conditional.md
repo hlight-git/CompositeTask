@@ -90,7 +90,7 @@ Branch 2: condition = null,                    node = IdleSequence    ← fallba
 
 If conditions need runtime-injected dependencies, override the ConditionalNode's `Accept` path OR make your TaskCondition visitable. The built-in ConditionalNode already propagates `Accept` to its child nodes.
 
-See `di-visitor.md` for the pattern.
+See `di-resolve.md` for the pattern.
 
 ## Runtime control
 

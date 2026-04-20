@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using Apero.Unity.Architecture.DependencyInjection;
 using Cysharp.Threading.Tasks;
 using Hlight.Structures.CompositeTask.Runtime.Blueprint;
 using UnityEngine;
@@ -81,7 +82,8 @@ namespace Hlight.Structures.CompositeTask.Runtime
             StatusChanged = null;
         }
 
-        public void Accept(IDependencyInjectionVisitor visitor) => Root?.Accept(visitor);
+        /// <summary>Pull dependencies from the context into every node of the tree.</summary>
+        public void ResolveDependencies(IDependencyContext context) => Root?.ResolveDependencies(context);
 
         /// <summary>Pre-warms the entire tree without executing. Safe to call before Execute().</summary>
         public void Warm() => Root?.Warm();

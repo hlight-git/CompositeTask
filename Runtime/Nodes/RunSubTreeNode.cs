@@ -1,4 +1,5 @@
 using System.Threading;
+using Apero.Unity.Architecture.DependencyInjection;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
 
@@ -29,10 +30,10 @@ namespace Hlight.Structures.CompositeTask.Runtime
             }
         }
 
-        public override void Accept(IDependencyInjectionVisitor v)
+        public override void ResolveDependencies(IDependencyContext context)
         {
-            base.Accept(v);
-            _subTree?.Accept(v);
+            base.ResolveDependencies(context);
+            _subTree?.ResolveDependencies(context);
         }
 
         public override void ResetTask()

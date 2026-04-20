@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Apero.Unity.Architecture.DependencyInjection;
 using UnityEngine;
 
 
@@ -118,11 +119,11 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         // ── Lifecycle Propagation ──────────────────────────────────────
 
-        public override void Accept(IDependencyInjectionVisitor v)
+        public override void ResolveDependencies(IDependencyContext context)
         {
-            base.Accept(v);
+            base.ResolveDependencies(context);
             EnsureChildren();
-            foreach (var child in _children) child?.Accept(v);
+            foreach (var child in _children) child?.ResolveDependencies(context);
         }
 
         protected override void OnWarm()

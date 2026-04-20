@@ -226,19 +226,27 @@ Use case: JSON controls flow + configurable data; prefabs provide Unity object r
 
 ## Dependency Injection
 
-Visitor pattern — opt-in per task:
+Pull-model — each node asks the context for what it needs. Uses `Apero.Unity.Architecture.DependencyInjection.IDependencyContext`.
 
 ```csharp
-public class MyVisitor : IDependencyInjectionVisitor
+public class MyTaskNode : TaskNode<MyTaskNode.Settings>
 {
-    public void Visit<T>(T target)
+    private Camera _camera;
+
+    public override void ResolveDependencies(IDependencyContext context)
     {
-        if (target is MyTaskNode t) t.Camera = myCamera;
+        base.ResolveDependencies(context);
+        _camera = context.Resolve<Camera>();
     }
+    // ...
 }
 
-taskTree.Accept(visitor);  // propagates to all nodes
+// After building the tree, before Execute():
+taskTree.ResolveDependencies(CompositeContext.Instance);
+taskTree.Execute();
 ```
+
+`TaskTree.ResolveDependencies` calls `Root.ResolveDependencies`, which `CompositeNode` propagates to every descendant. `ConditionalNode.ResolveDependencies` also visits all branch nodes; `RunSubTreeNode.ResolveDependencies` propagates into the sub-tree.
 
 ## Editor Features
 

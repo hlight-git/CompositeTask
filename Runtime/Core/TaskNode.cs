@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using Apero.Unity.Architecture.DependencyInjection;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
 
@@ -182,7 +183,12 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         // ── DI ─────────────────────────────────────────────────────────
 
-        public virtual void Accept(IDependencyInjectionVisitor v) => v.Visit(this);
+        /// <summary>
+        /// Pull dependencies from the provided context. Default: no-op.
+        /// Override in subclasses that need runtime-injected services; call base first.
+        /// Composite nodes propagate the call to children automatically.
+        /// </summary>
+        public virtual void ResolveDependencies(IDependencyContext context) { }
 
         // ── Validation (editor) ────────────────────────────────────────
 

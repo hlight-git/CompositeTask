@@ -1,6 +1,6 @@
 ---
 name: composite-task
-description: Use this skill whenever working with the Composite Task Unity package (Hlight.Structures.CompositeTask) — creating TaskNode/TaskNode<T> classes, authoring Blueprint JSON, building task trees in a scene via Unity MCP from a natural-language scenario, configuring PresetTaskTree, wiring TaskCondition/ConditionalNode branches, using IInlineTask, DI visitors, or debugging task lifecycle. Trigger on mentions of TaskTree, TaskNode, DefineTaskNode, SequentialNode, ParallelNode, Blueprint, composite task, or when the user describes a gameplay flow that resembles a sequence/parallel/conditional task graph — even if they don't name the package explicitly.
+description: Use this skill whenever working with the Composite Task Unity package (Hlight.Structures.CompositeTask) — creating TaskNode/TaskNode<T> classes, authoring Blueprint JSON, building task trees in a scene via Unity MCP from a natural-language scenario, configuring PresetTaskTree, wiring TaskCondition/ConditionalNode branches, using IInlineTask, resolving dependencies via IDependencyContext, or debugging task lifecycle. Trigger on mentions of TaskTree, TaskNode, DefineTaskNode, SequentialNode, ParallelNode, Blueprint, composite task, or when the user describes a gameplay flow that resembles a sequence/parallel/conditional task graph — even if they don't name the package explicitly.
 ---
 
 # Composite Task — Skill
@@ -34,7 +34,7 @@ TaskTree (MonoBehaviour)                  — root manager, CTS, events
 | "Set up branching / if-then-else" | Conditional + TaskCondition | `references/conditional.md` |
 | "Add logic at runtime without making a MonoBehaviour" | IInlineTask | `references/inline-tasks.md` |
 | "Load tree from JSON at runtime with prefab leaves" | PresetTaskTree + LoadFromJson | `references/preset-tree.md` |
-| "Inject dependencies into tasks" | Visitor pattern | `references/di-visitor.md` |
+| "Inject dependencies into tasks" | Override `ResolveDependencies(IDependencyContext)` | `references/di-resolve.md` |
 
 ## Core Rules (apply to ALL tasks in this package)
 

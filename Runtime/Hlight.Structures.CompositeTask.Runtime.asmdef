@@ -2,7 +2,8 @@
     "name": "Hlight.Structures.CompositeTask.Runtime",
     "rootNamespace": "Hlight.Structures.CompositeTask.Runtime",
     "references": [
-        "UniTask"
+        "UniTask",
+        "DependencyInjectionImplementation"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
