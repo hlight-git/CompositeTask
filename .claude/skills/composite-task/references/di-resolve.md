@@ -1,14 +1,14 @@
 # Dependency Injection (pull-model)
 
-Inject shared runtime dependencies (camera, services, managers) into TaskNodes using the project's pull-model DI.
+Inject shared runtime dependencies (camera, services, managers) into TaskNodes using a pull-model DI pattern.
 
-**Package**: `Apero.Unity.Architecture.DependencyInjection` (`Assets/Submodules/Dependency Injection Implementation/`)
+The package defines its own minimal `IDependencyContext` interface (`Hlight.Structures.CompositeTask.Runtime.IDependencyContext`) so the submodule has **no hard dependency on any specific DI package**. Any project-level DI context that exposes the same method shape can satisfy it directly — just add the interface to the context's interface list. The submodule ships `Resolve<T>()` as an extension method that throws on miss (`DependencyContextExtensions`).
 
 ## Mental model
 
 Each TaskNode overrides `ResolveDependencies(IDependencyContext context)` and pulls what it needs via `context.Resolve<T>()` or `context.TryResolve(out T)`. The tree walks itself — `CompositeNode` propagates to children, `ConditionalNode` to branches, `RunSubTreeNode` to the sub-tree.
 
-No visitor, no `IInjectable` marker interface, no reflection. Plain virtual method overrides.
+No visitor, no marker interface, no reflection. Plain virtual method overrides.
 
 ## The contract
 
@@ -42,28 +42,57 @@ public class ShakeCameraNode : TaskNode<ShakeCameraNode.Settings>
 }
 ```
 
-## Producer side (a local context)
+## Producer side — bridging from a project DI context
 
-Define a `MonoBehaviour : IDependencyContext, IDependencyProvider<T1>, IDependencyProvider<T2>…` in your scene. Register in `OnEnable`, unregister in `OnDisable`. See the DI package's own docs for provider patterns — the Composite Task package is agnostic to how the context is assembled.
+The Composite Task `IDependencyContext` is just:
+
+```csharp
+namespace Hlight.Structures.CompositeTask.Runtime
+{
+    public interface IDependencyContext
+    {
+        bool TryResolve<T>(out T value, string id = null) where T : class;
+    }
+}
+```
+
+If your project already has its own DI context with the exact same `TryResolve<T>(out, id)` signature, **add the interface to the class's interface list** — no method changes needed. Example from this project:
+
+```csharp
+public partial class GameplayContext :
+    ASceneContext,
+    Apero.Unity.Architecture.DependencyInjection.IDependencyContext,   // existing
+    Hlight.Structures.CompositeTask.Runtime.IDependencyContext,        // added
+    IDependencyProvider<Camera>,
+    // ... providers ...
+{
+    public bool TryResolve<T>(out T value, string id = null) where T : class
+    {
+        // same body satisfies both interfaces
+    }
+}
+```
+
+If signatures don't match (e.g. different id type, different generic constraint), write a thin adapter class that delegates.
 
 ## Applying the context to a tree
 
 ```csharp
 // After building / loading the tree, before Execute():
-taskTree.ResolveDependencies(CompositeContext.Instance);
+taskTree.ResolveDependencies(myContext);
 taskTree.Execute();
 ```
 
 Typical order in a level-loading flow:
 
 ```csharp
-tree.LoadFromJson(json);                              // build hierarchy
-tree.ResolveDependencies(CompositeContext.Instance);  // inject
-tree.Warm();                                          // one-time per-node init
-tree.Execute();                                       // run
+tree.LoadFromJson(json);             // build hierarchy
+tree.ResolveDependencies(myContext); // inject
+tree.Warm();                         // one-time per-node init
+tree.Execute();                      // run
 ```
 
-`CompositeContext.Instance` is the singleton aggregator from the DI package. Any scoped / project-local context that implements `IDependencyContext` works too.
+`myContext` can be a scene-level context, a singleton, or a wrapper — anything that implements the interface.
 
 ## Propagation under the hood
 

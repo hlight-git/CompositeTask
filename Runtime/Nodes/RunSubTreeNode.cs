@@ -1,5 +1,4 @@
 using System.Threading;
-using Apero.Unity.Architecture.DependencyInjection;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
 

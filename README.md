@@ -226,7 +226,7 @@ Use case: JSON controls flow + configurable data; prefabs provide Unity object r
 
 ## Dependency Injection
 
-Pull-model — each node asks the context for what it needs. Uses `Apero.Unity.Architecture.DependencyInjection.IDependencyContext`.
+Pull-model — each node asks the context for what it needs. The package defines its own `IDependencyContext` interface (`Hlight.Structures.CompositeTask.Runtime.IDependencyContext`) so the submodule stays self-contained. Any project-level DI context can satisfy it — either implement the interface directly on your context class (if its `TryResolve` signature already matches) or write a one-class adapter.
 
 ```csharp
 public class MyTaskNode : TaskNode<MyTaskNode.Settings>
@@ -242,8 +242,21 @@ public class MyTaskNode : TaskNode<MyTaskNode.Settings>
 }
 
 // After building the tree, before Execute():
-taskTree.ResolveDependencies(CompositeContext.Instance);
+taskTree.ResolveDependencies(myDependencyContext);
 taskTree.Execute();
+```
+
+**Interface shape** (identical to typical pull-model DI packages so your existing context class likely satisfies it with no method changes):
+
+```csharp
+public interface IDependencyContext
+{
+    bool TryResolve<T>(out T value, string id = null) where T : class;
+}
+
+// Extension:
+T Resolve<T>(this IDependencyContext ctx, string id = null) where T : class
+    // throws KeyNotFoundException on miss
 ```
 
 `TaskTree.ResolveDependencies` calls `Root.ResolveDependencies`, which `CompositeNode` propagates to every descendant. `ConditionalNode.ResolveDependencies` also visits all branch nodes; `RunSubTreeNode.ResolveDependencies` propagates into the sub-tree.
