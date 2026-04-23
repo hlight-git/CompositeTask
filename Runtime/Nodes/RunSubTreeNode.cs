@@ -29,10 +29,10 @@ namespace Hlight.Structures.CompositeTask.Runtime
             }
         }
 
-        public override void ResolveDependencies(IDependencyContext context)
+        public override void ResolveFrom(IServiceLocator locator)
         {
-            base.ResolveDependencies(context);
-            _subTree?.ResolveDependencies(context);
+            base.ResolveFrom(locator);
+            _subTree?.ResolveFrom(locator);
         }
 
         public override void ResetTask()

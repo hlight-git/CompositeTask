@@ -226,7 +226,7 @@ Use case: JSON controls flow + configurable data; prefabs provide Unity object r
 
 ## Dependency Injection
 
-Pull-model — each node asks the context for what it needs. The package defines its own `IDependencyContext` interface (`Hlight.Structures.CompositeTask.Runtime.IDependencyContext`) so the submodule stays self-contained. Any project-level DI context can satisfy it — either implement the interface directly on your context class (if its `GetProvider<T>` signature already matches) or write a one-class adapter.
+Pull-model — each node asks the context for what it needs. The package defines its own `IServiceLocator` interface (`Hlight.Structures.CompositeTask.Runtime.IServiceLocator`) so the submodule stays self-contained. Any project-level DI context can satisfy it — either implement the interface directly on your context class (if its `GetProvider<T>` signature already matches) or write a one-class adapter.
 
 ```csharp
 public class MyTaskNode : TaskNode<MyTaskNode.Settings>
@@ -234,31 +234,31 @@ public class MyTaskNode : TaskNode<MyTaskNode.Settings>
     private Camera _camera;
     private IAudioService _audio;
 
-    public override void ResolveDependencies(IDependencyContext context)
+    public override void ResolveFrom(IServiceLocator locator)
     {
-        base.ResolveDependencies(context);
+        base.ResolveFrom(locator);
 
         // Required dep: fail loudly if missing.
-        if (!context.GetProvider<Camera>().TryProvide(out _camera))
+        if (!locator.GetProvider<Camera>(this).TryProvide(out _camera))
             throw new KeyNotFoundException("Camera provider missing");
 
         // Optional dep: leave null on miss.
-        context.GetProvider<IAudioService>()?.TryProvide(out _audio);
+        locator.GetProvider<IAudioService>(this)?.TryProvide(out _audio);
     }
     // ...
 }
 
 // After building the tree, before Execute():
-taskTree.ResolveDependencies(myDependencyContext);
+taskTree.ResolveFrom(myLocator);
 taskTree.Execute();
 ```
 
 **Interface shape** — no `Resolve`/`TryResolve` wrappers ship intentionally, so IDE "Find Usages" on `TryProvide` surfaces every real consumer of a given type:
 
 ```csharp
-public interface IDependencyContext
+public interface IServiceLocator
 {
-    IProvider<T> GetProvider<T>() where T : class;
+    IProvider<T> GetProvider<T>(object dependencyConsumer) where T : class;
 
     public interface IProvider<T> where T : class
     {
@@ -267,7 +267,7 @@ public interface IDependencyContext
 }
 ```
 
-`TaskTree.ResolveDependencies` calls `Root.ResolveDependencies`, which `CompositeNode` propagates to every descendant. `ConditionalNode.ResolveDependencies` also visits all branch nodes; `RunSubTreeNode.ResolveDependencies` propagates into the sub-tree.
+`TaskTree.ResolveFrom` calls `Root.ResolveFrom`, which `CompositeNode` propagates to every descendant. `ConditionalNode.ResolveFrom` also visits all branch nodes; `RunSubTreeNode.ResolveFrom` propagates into the sub-tree.
 
 ## Editor Features
 

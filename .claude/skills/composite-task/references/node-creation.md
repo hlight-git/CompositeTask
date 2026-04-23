@@ -269,7 +269,7 @@ Warnings appear in the Inspector above the node fields.
 
 ## DI (dependency injection)
 
-If the task needs a runtime-injected reference (camera, service), override `ResolveDependencies` and pull from the context. Always call `base.ResolveDependencies(context)` first.
+If the task needs a runtime-injected reference (camera, service), override `ResolveFrom` and pull from the context. Always call `base.ResolveFrom(locator)` first.
 
 ```csharp
 using Hlight.Structures.CompositeTask.Runtime;
@@ -278,10 +278,10 @@ public class ShakeCameraNode : TaskNode<ShakeCameraNode.Settings>
 {
     private Camera _camera;
 
-    public override void ResolveDependencies(IDependencyContext context)
+    public override void ResolveFrom(IServiceLocator locator)
     {
-        base.ResolveDependencies(context);
-        if (!context.GetProvider<Camera>().TryProvide(out _camera))
+        base.ResolveFrom(locator);
+        if (!locator.GetProvider<Camera>(this).TryProvide(out _camera))
             throw new System.Collections.Generic.KeyNotFoundException("Camera provider missing");
     }
     // ...
@@ -291,7 +291,7 @@ public class ShakeCameraNode : TaskNode<ShakeCameraNode.Settings>
 The tree applies the context once (typically after build, before Execute):
 
 ```csharp
-taskTree.ResolveDependencies(myDependencyContext);
+taskTree.ResolveFrom(myLocator);
 ```
 
 See `di-resolve.md` for propagation details, optional deps, and timing rules.

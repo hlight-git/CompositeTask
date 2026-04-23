@@ -118,11 +118,11 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         // ── Lifecycle Propagation ──────────────────────────────────────
 
-        public override void ResolveDependencies(IDependencyContext context)
+        public override void ResolveFrom(IServiceLocator locator)
         {
-            base.ResolveDependencies(context);
+            base.ResolveFrom(locator);
             EnsureChildren();
-            foreach (var child in _children) child?.ResolveDependencies(context);
+            foreach (var child in _children) child?.ResolveFrom(locator);
         }
 
         protected override void OnWarm()

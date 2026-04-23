@@ -40,11 +40,11 @@ namespace Hlight.Structures.CompositeTask.Runtime
                 branch.node?.Warm();
         }
 
-        public override void ResolveDependencies(IDependencyContext context)
+        public override void ResolveFrom(IServiceLocator locator)
         {
-            base.ResolveDependencies(context);
+            base.ResolveFrom(locator);
             foreach (var branch in _branches)
-                branch.node?.ResolveDependencies(context);
+                branch.node?.ResolveFrom(locator);
         }
 
         public override void ResetTask()

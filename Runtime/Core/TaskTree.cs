@@ -81,8 +81,8 @@ namespace Hlight.Structures.CompositeTask.Runtime
             StatusChanged = null;
         }
 
-        /// <summary>Pull dependencies from the context into every node of the tree.</summary>
-        public void ResolveDependencies(IDependencyContext context) => Root?.ResolveDependencies(context);
+        /// <summary>Pull dependencies from the locator into every node of the tree.</summary>
+        public void ResolveFrom(IServiceLocator locator) => Root?.ResolveFrom(locator);
 
         /// <summary>Pre-warms the entire tree without executing. Safe to call before Execute().</summary>
         public void Warm() => Root?.Warm();

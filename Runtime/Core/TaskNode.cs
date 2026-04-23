@@ -183,11 +183,11 @@ namespace Hlight.Structures.CompositeTask.Runtime
         // ── DI ─────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Pull dependencies from the provided context. Default: no-op.
+        /// Pull dependencies from the supplied locator. Default: no-op.
         /// Override in subclasses that need runtime-injected services; call base first.
         /// Composite nodes propagate the call to children automatically.
         /// </summary>
-        public virtual void ResolveDependencies(IDependencyContext context) { }
+        public virtual void ResolveFrom(IServiceLocator locator) { }
 
         // ── Validation (editor) ────────────────────────────────────────
 

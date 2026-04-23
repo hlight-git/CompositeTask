@@ -70,7 +70,7 @@ public class MyLevelTree : PresetTaskTree
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | Preset not applied, bare GameObject instantiated | `typeId` in JSON doesn't match preset's `typeId` exactly (case-sensitive) | Log `TaskNodeRegistry.AllEntries` keys and compare. Spaces/casing matter. |
-| `[SerializeField]` ref is null on cloned preset | Prefab's ref pointed to a scene object — Unity nulls scene refs when the prefab is loaded outside that scene | Keep refs inside the prefab's own hierarchy, or inject via `TaskTree.ResolveDependencies(context)` after LoadFromJson |
+| `[SerializeField]` ref is null on cloned preset | Prefab's ref pointed to a scene object — Unity nulls scene refs when the prefab is loaded outside that scene | Keep refs inside the prefab's own hierarchy, or inject via `TaskTree.ResolveFrom(locator)` after LoadFromJson |
 | Config fields still show prefab defaults, not JSON values | JSON `config` object keys don't match `Settings` class field names (case matters) | Re-check Settings field names. JSON is case-sensitive. |
 | Warnings about "Preset for 'X' has no TaskNode" | Preset prefab missing the component | Add the TaskNode component to the prefab's root GameObject |
 | Old tree state persists after LoadFromJson | Code continues executing against stale refs | `LoadFromJson` destroys TaskNode children but not your captured references — re-acquire via `taskTree.Root` after load |
@@ -82,7 +82,7 @@ public class MyLevelTree : PresetTaskTree
 - **Prefab must have the right TaskNode component.** If preset prefab is missing the TaskNode, `TaskTreeBuilder.BuildLeafFromPreset` attempts `AddComponent` as a fallback — works but defeats the prefab purpose.
 - **Prefab refs to scene objects** will be null after instantiate (standard Unity prefab behaviour). Keep refs inside the prefab's own hierarchy or inject via DI.
 - **Re-LoadFromJson** destroys previous children (detached first, then `Destroy`/`DestroyImmediate`). Any state in old leaves is lost.
-- **Call `ResolveDependencies(context)` AFTER LoadFromJson** — the old tree's DI-injected refs don't survive rebuild; the new tree needs a fresh pass.
+- **Call `ResolveFrom(locator)` AFTER LoadFromJson** — the old tree's DI-injected refs don't survive rebuild; the new tree needs a fresh pass.
 
 ## JSON vs Preset: who wins?
 
