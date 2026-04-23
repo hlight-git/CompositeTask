@@ -2,11 +2,13 @@
 
 Inject shared runtime dependencies (camera, services, managers) into TaskNodes using a pull-model DI pattern.
 
-The package defines its own minimal `IDependencyContext` interface (`Hlight.Structures.CompositeTask.Runtime.IDependencyContext`) so the submodule has **no hard dependency on any specific DI package**. Any project-level DI context that exposes the same method shape can satisfy it directly — just add the interface to the context's interface list. The submodule ships `Resolve<T>()` as an extension method that throws on miss (`DependencyContextExtensions`).
+The package defines its own minimal `IDependencyContext` interface (`Hlight.Structures.CompositeTask.Runtime.IDependencyContext`) so the submodule has **no hard dependency on any specific DI package**. Any project-level DI context that exposes the same method shape can satisfy it directly — just add the interface to the context's interface list. Shape mirrors `Apero.Unity.DesignPattern.DependencyInversion.ServiceLocator.IServiceLocator` so one adapter class bridges an Apero scope in.
+
+**No `Resolve` / `TryResolve` wrapper ships** — intentional. A generic wrapper hides `TryProvide` from IDE Find Usages behind a single call site. Task nodes call `context.GetProvider<T>()?.TryProvide(out _field, key)` at the use-site so Find Usages on `TryProvide` lists every real consumer of `T`.
 
 ## Mental model
 
-Each TaskNode overrides `ResolveDependencies(IDependencyContext context)` and pulls what it needs via `context.Resolve<T>()` or `context.TryResolve(out T)`. The tree walks itself — `CompositeNode` propagates to children, `ConditionalNode` to branches, `RunSubTreeNode` to the sub-tree.
+Each TaskNode overrides `ResolveDependencies(IDependencyContext context)` and pulls what it needs via `context.GetProvider<T>()?.TryProvide(out _field, instanceKey)`. The tree walks itself — `CompositeNode` propagates to children, `ConditionalNode` to branches, `RunSubTreeNode` to the sub-tree.
 
 No visitor, no marker interface, no reflection. Plain virtual method overrides.
 
@@ -29,8 +31,13 @@ public class ShakeCameraNode : TaskNode<ShakeCameraNode.Settings>
     public override void ResolveDependencies(IDependencyContext context)
     {
         base.ResolveDependencies(context);
-        _camera = context.Resolve<Camera>();                   // required — throws if missing
-        context.TryResolve(out _audio);                        // optional — null if missing
+
+        // Required — throw loudly if no provider for Camera.
+        if (!context.GetProvider<Camera>().TryProvide(out _camera))
+            throw new System.Collections.Generic.KeyNotFoundException("Camera provider missing");
+
+        // Optional — null on miss.
+        context.GetProvider<IAudioService>()?.TryProvide(out _audio);
     }
 
     protected override async UniTask OnRunning(Settings config, CancellationToken ct)
@@ -44,36 +51,55 @@ public class ShakeCameraNode : TaskNode<ShakeCameraNode.Settings>
 
 ## Producer side — bridging from a project DI context
 
-The Composite Task `IDependencyContext` is just:
+The Composite Task `IDependencyContext` is:
 
 ```csharp
 namespace Hlight.Structures.CompositeTask.Runtime
 {
     public interface IDependencyContext
     {
-        bool TryResolve<T>(out T value, string id = null) where T : class;
+        IProvider<T> GetProvider<T>() where T : class;
+
+        public interface IProvider<T> where T : class
+        {
+            bool TryProvide(out T value, string instanceKey = null);
+        }
     }
 }
 ```
 
-If your project already has its own DI context with the exact same `TryResolve<T>(out, id)` signature, **add the interface to the class's interface list** — no method changes needed. Example from this project:
+If your project's DI context already exposes `GetProvider<T>` with this exact shape, **add the interface to the class's interface list** — no new methods needed. Otherwise write a thin adapter class that delegates. Example adapter bridging an Apero scope (`IServiceLocator` in `Apero.Unity.DesignPattern.DependencyInversion.ServiceLocator`) into this contract:
 
 ```csharp
-public partial class GameplayContext :
-    ASceneContext,
-    Apero.Unity.Architecture.DependencyInjection.IDependencyContext,   // existing
-    Hlight.Structures.CompositeTask.Runtime.IDependencyContext,        // added
-    IDependencyProvider<Camera>,
-    // ... providers ...
+sealed class CompositeTaskContextAdapter : Hlight.Structures.CompositeTask.Runtime.IDependencyContext
 {
-    public bool TryResolve<T>(out T value, string id = null) where T : class
+    readonly Apero.Unity.DesignPattern.DependencyInversion.ServiceLocator.IServiceLocator _locator;
+    readonly object _consumer;
+
+    public CompositeTaskContextAdapter(
+        Apero.Unity.DesignPattern.DependencyInversion.ServiceLocator.IServiceLocator locator,
+        object consumer)
     {
-        // same body satisfies both interfaces
+        _locator = locator;
+        _consumer = consumer;
+    }
+
+    public Hlight.Structures.CompositeTask.Runtime.IDependencyContext.IProvider<T> GetProvider<T>()
+        where T : class
+    {
+        var aperoProvider = _locator.GetProvider<T>(_consumer);
+        return aperoProvider == null ? null : new Wrap<T>(aperoProvider);
+    }
+
+    sealed class Wrap<T> : Hlight.Structures.CompositeTask.Runtime.IDependencyContext.IProvider<T>
+        where T : class
+    {
+        readonly Apero.Unity.DesignPattern.DependencyInversion.ServiceLocator.IServiceLocator.IProvider<T> _inner;
+        public Wrap(Apero.Unity.DesignPattern.DependencyInversion.ServiceLocator.IServiceLocator.IProvider<T> inner) { _inner = inner; }
+        public bool TryProvide(out T value, string instanceKey = null) => _inner.TryProvide(out value, instanceKey);
     }
 }
 ```
-
-If signatures don't match (e.g. different id type, different generic constraint), write a thin adapter class that delegates.
 
 ## Applying the context to a tree
 
@@ -128,14 +154,17 @@ Each pass calls every node's `ResolveDependencies` with its own context. Idempot
 public override void ResolveDependencies(IDependencyContext context)
 {
     base.ResolveDependencies(context);
-    _camera = context.Resolve<Camera>();           // required
-    if (context.TryResolve(out IAnalytics a))      // optional
-        _analytics = a;
-    // else: _analytics stays null
+
+    // Required — fail loud.
+    if (!context.GetProvider<Camera>().TryProvide(out _camera))
+        throw new System.Collections.Generic.KeyNotFoundException("Camera provider missing");
+
+    // Optional — null on miss.
+    context.GetProvider<IAnalytics>()?.TryProvide(out _analytics);
 }
 ```
 
-Rule: `Resolve` for required deps (fast-fail surfaces bugs early). `TryResolve` for genuinely optional ones.
+Rule: throw on miss for required deps (fast-fail surfaces bugs early). Allow null for genuinely optional ones.
 
 ## Anti-patterns
 
@@ -147,9 +176,9 @@ Rule: `Resolve` for required deps (fast-fail surfaces bugs early). `TryResolve` 
 
 ## Assumption check
 
-If `Resolve<T>()` throws `KeyNotFoundException`, the caller didn't register a `IDependencyProvider<T>` with the context. Verify the owning MonoBehaviour:
-- Ran `OnEnable` (registered) before the tree called `ResolveDependencies`.
-- Implements `IDependencyProvider<T>` and `TryProvide` returns `true` for the requested `id`.
-- Is still registered — `OnDisable` unregisters it.
+If `context.GetProvider<T>()` returns null or `TryProvide` returns false, the caller's DI context doesn't serve `T`. Verify:
+- The owning context was wired into the task tree before `ResolveDependencies` ran (canonical timing: after `LoadFromJson` / manual build, before `Execute`).
+- The context's `GetProvider<T>` actually returns a non-null `IProvider<T>` for the requested type (for scope chains: check the whole chain up to root).
+- `TryProvide` returns `true` for the requested `instanceKey` — mismatched key is a silent miss.
 
 See the DI package's skill/docs for context-side debugging.

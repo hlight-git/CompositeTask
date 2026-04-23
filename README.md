@@ -226,17 +226,24 @@ Use case: JSON controls flow + configurable data; prefabs provide Unity object r
 
 ## Dependency Injection
 
-Pull-model — each node asks the context for what it needs. The package defines its own `IDependencyContext` interface (`Hlight.Structures.CompositeTask.Runtime.IDependencyContext`) so the submodule stays self-contained. Any project-level DI context can satisfy it — either implement the interface directly on your context class (if its `TryResolve` signature already matches) or write a one-class adapter.
+Pull-model — each node asks the context for what it needs. The package defines its own `IDependencyContext` interface (`Hlight.Structures.CompositeTask.Runtime.IDependencyContext`) so the submodule stays self-contained. Any project-level DI context can satisfy it — either implement the interface directly on your context class (if its `GetProvider<T>` signature already matches) or write a one-class adapter.
 
 ```csharp
 public class MyTaskNode : TaskNode<MyTaskNode.Settings>
 {
     private Camera _camera;
+    private IAudioService _audio;
 
     public override void ResolveDependencies(IDependencyContext context)
     {
         base.ResolveDependencies(context);
-        _camera = context.Resolve<Camera>();
+
+        // Required dep: fail loudly if missing.
+        if (!context.GetProvider<Camera>().TryProvide(out _camera))
+            throw new KeyNotFoundException("Camera provider missing");
+
+        // Optional dep: leave null on miss.
+        context.GetProvider<IAudioService>()?.TryProvide(out _audio);
     }
     // ...
 }
@@ -246,17 +253,18 @@ taskTree.ResolveDependencies(myDependencyContext);
 taskTree.Execute();
 ```
 
-**Interface shape** (identical to typical pull-model DI packages so your existing context class likely satisfies it with no method changes):
+**Interface shape** — no `Resolve`/`TryResolve` wrappers ship intentionally, so IDE "Find Usages" on `TryProvide` surfaces every real consumer of a given type:
 
 ```csharp
 public interface IDependencyContext
 {
-    bool TryResolve<T>(out T value, string id = null) where T : class;
-}
+    IProvider<T> GetProvider<T>() where T : class;
 
-// Extension:
-T Resolve<T>(this IDependencyContext ctx, string id = null) where T : class
-    // throws KeyNotFoundException on miss
+    public interface IProvider<T> where T : class
+    {
+        bool TryProvide(out T value, string instanceKey = null);
+    }
+}
 ```
 
 `TaskTree.ResolveDependencies` calls `Root.ResolveDependencies`, which `CompositeNode` propagates to every descendant. `ConditionalNode.ResolveDependencies` also visits all branch nodes; `RunSubTreeNode.ResolveDependencies` propagates into the sub-tree.

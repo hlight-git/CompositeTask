@@ -272,7 +272,7 @@ Warnings appear in the Inspector above the node fields.
 If the task needs a runtime-injected reference (camera, service), override `ResolveDependencies` and pull from the context. Always call `base.ResolveDependencies(context)` first.
 
 ```csharp
-using Apero.Unity.Architecture.DependencyInjection;
+using Hlight.Structures.CompositeTask.Runtime;
 
 public class ShakeCameraNode : TaskNode<ShakeCameraNode.Settings>
 {
@@ -281,7 +281,8 @@ public class ShakeCameraNode : TaskNode<ShakeCameraNode.Settings>
     public override void ResolveDependencies(IDependencyContext context)
     {
         base.ResolveDependencies(context);
-        _camera = context.Resolve<Camera>();
+        if (!context.GetProvider<Camera>().TryProvide(out _camera))
+            throw new System.Collections.Generic.KeyNotFoundException("Camera provider missing");
     }
     // ...
 }
@@ -290,7 +291,7 @@ public class ShakeCameraNode : TaskNode<ShakeCameraNode.Settings>
 The tree applies the context once (typically after build, before Execute):
 
 ```csharp
-taskTree.ResolveDependencies(CompositeContext.Instance);
+taskTree.ResolveDependencies(myDependencyContext);
 ```
 
-See `di-resolve.md` for propagation details, optional deps (`TryResolve`), and timing rules.
+See `di-resolve.md` for propagation details, optional deps, and timing rules.
