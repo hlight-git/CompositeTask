@@ -1,0 +1,10 @@
+{
+  "name": "com.hlight.composite-task",
+  "version": "1.2.0",
+  "displayName": "Composite Task",
+  "description": "Composable task tree system with sequential and parallel nodes.",
+  "unity": "6000.0",
+  "author": {
+    "name": "Hlight"
+  }
+}
