@@ -155,7 +155,7 @@ public class MyTaskNode : TaskNode<MyTaskNode.Settings>
 ### Special
 | Node | Description |
 |------|-------------|
-| Conditional | Branch: evaluate conditions top-down, execute first match |
+| Conditional | Branch with multi-condition AND evaluations + `fallbackNode` for no-match |
 | Run Sub Tree | Execute another TaskTree |
 
 ## Composite Nodes
@@ -168,13 +168,27 @@ public class MyTaskNode : TaskNode<MyTaskNode.Settings>
 
 ## Conditional Node
 
+Branches are evaluated top-to-bottom. Each `Branch` has an array of `Evaluation` entries combined with logical AND — the branch matches only when every evaluation matches its `expectedValue`. If no branch matches, the `fallbackNode` runs.
+
 ```
 ConditionalNode
-├── Branch[0]: condition=HealthCheck, node=HealSequence
-├── Branch[1]: condition=null, node=DefaultSequence  ← fallback
+├── _branches[0]
+│     ├── evaluations: [ HealthLow (expected=true) ]
+│     └── node: HealSequence
+├── _branches[1]
+│     ├── evaluations: [ EnemyInRange (expected=true), HasAmmo (expected=true) ]
+│     └── node: AttackSequence
+└── fallbackNode: IdleSequence
 ```
 
-`TaskCondition` — abstract MonoBehaviour with `bool Evaluate()`. Assign to branches via Inspector.
+**`TaskCondition`** — abstract MonoBehaviour. Subclass and implement `protected bool OnEvaluate()`. Public `Evaluate()` caches the outcome in `LastResult`; set `Evaluation.useLastResult = true` to reuse the cached value across branches that share a condition (no re-evaluation).
+
+**`Evaluation`** fields:
+- `condition` — the `TaskCondition` to check.
+- `expectedValue` — match target. Default `true`. Set to `false` to invert (branch matches when condition is false).
+- `useLastResult` — reuse `condition.LastResult` instead of calling `Evaluate()` again.
+
+**`fallbackNode`** — runs when no branch matches. Optional (null = complete silently). Like branch nodes, it must be a Transform child of the Conditional (validated by `IsValidChild` / `GetValidationWarnings`).
 
 ## Inline Tasks (Runtime)
 
