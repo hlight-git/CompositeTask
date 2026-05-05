@@ -37,14 +37,17 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         public override void ResetTask()
         {
-            _subTree?.ResetTree();
+            // Parent-first: cancel our own CTS before propagating into the sub-tree.
+            // Sync UniTask continuations from the sub-tree's cancel would otherwise
+            // re-enter our state machine and reach OnCompleted before SetStatus(Pending).
             base.ResetTask();
+            _subTree?.ResetTree();
         }
 
         public override void Dispose()
         {
-            _subTree?.Dispose();
             base.Dispose();
+            _subTree?.Dispose();
         }
 
         private void OnSubTreeProgress(TaskNode node, float delta)

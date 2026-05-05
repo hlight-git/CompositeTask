@@ -74,18 +74,22 @@ namespace Hlight.Structures.CompositeTask.Runtime
 
         public override void ResetTask()
         {
+            // Parent-first: cancel our own CTS before propagating, otherwise sync UniTask
+            // continuations from a child's cancel will re-enter our state machine and
+            // fire OnCompleted before SetStatus(Pending) lands.
+            base.ResetTask();
             foreach (var branch in _branches)
                 branch.node?.ResetTask();
             fallbackNode?.ResetTask();
-            base.ResetTask();
         }
 
         public override void Dispose()
         {
+            // Same parent-first rationale as ResetTask.
+            base.Dispose();
             foreach (var branch in _branches)
                 branch.node?.Dispose();
             fallbackNode?.Dispose();
-            base.Dispose();
         }
 
         public override bool IsValidChild(TaskNode child)
